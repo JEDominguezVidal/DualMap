@@ -31,13 +31,13 @@ cd DualMap
 ```
 >  Make sure to use `--recurse-submodules` to get `mobileclip`.
 
-### 2. Create Python Virtual Environment (Recommended due to ROS 2 Jazzy compatibility)
+### 2. Create Python Virtual Environment
 ```bash
 # Install venv if not present
 sudo apt install python3-venv
 
 # Create virtual environment
-python3 -m venv dualmap312
+python3.12 -m venv dualmap312
 
 # Activate environment
 source dualmap312/bin/activate
