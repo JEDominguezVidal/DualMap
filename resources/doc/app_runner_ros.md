@@ -133,12 +133,12 @@ Meanwhile, the **global (abstract) map** will be saved in your configured `outpu
     <img src="../image/app_ros/app_ros1_meetingroom.jpg" width="70%">
 </p>
 
-## ROS2 (Humble) Guide
+## ROS2 (Jazzy) Guide
 
 ### Environment Setup
 
-- **If you're using Ubuntu 22.04**:  
-  Follow the official ROS2 Humble installation guide:   [ROS Humble Installation - Official Guide](https://docs.ros.org/en/humble/Installation.html)
+- **If you're using Ubuntu 24.04**:  
+  Follow the official ROS2 Jazzy installation guide:   [ROS Jazzy Installation - Official Guide](https://docs.ros.org/en/jazzy/Installation.html)
 
 
 ### Download Rosbag Data
@@ -198,13 +198,14 @@ use_compressed_topic: false
 
 ```bash
 cd DualMap
-conda activate dualmap
+source dualmap312/bin/activate
 ```
 **2. Source ROS2 and Run DualMap**
 
 
 ```bash
-source /opt/ros/humble/setup.bash
+```bash
+source /opt/ros/jazzy/setup.bash
 python -m applications.runner_ros
 ```
 You will see output like the following in the terminal:

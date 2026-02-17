@@ -69,7 +69,7 @@ dataset/
 ## Run
 First activate the conda environment
 ```
-conda activate dualmap
+source dualmap312/bin/activate
 ```
 
 Then, navigate to the repository root and run the application:

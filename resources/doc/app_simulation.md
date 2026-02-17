@@ -41,9 +41,9 @@ Then, open a terminal and start DualMap:
 
 ```bash
 cd DualMap
-conda activate dualmap
+source dualmap312/bin/activate
 
-source /opt/ros/humble/setup.bash
+source /opt/ros/jazzy/setup.bash
 python -m applications.runner_ros
 ```
 
@@ -52,7 +52,7 @@ Next, open a **new terminal** and start the Habitat Data Collector:
 cd <Path to >/habitat-data-collector
 conda activate habitat_data_collector
 
-source /opt/ros/humble/setup.bash
+source /opt/ros/jazzy/setup.bash
 python -m habitat_data_collector.main
 ```
 
@@ -104,9 +104,9 @@ Then, open a terminal and start DualMap:
 
 ```bash
 cd DualMap
-conda activate dualmap
+source dualmap312/bin/activate
 
-source /opt/ros/humble/setup.bash
+source /opt/ros/jazzy/setup.bash
 python -m applications.runner_ros
 ```
 
@@ -115,7 +115,7 @@ Next, open a **new terminal** and start the Habitat Data Collector to trigger th
 cd <Path to >/habitat-data-collector
 conda activate habitat_data_collector
 
-source /opt/ros/humble/setup.bash
+source /opt/ros/jazzy/setup.bash
 python -m habitat_data_collector.main
 ```
 You can also use a `rosbag` to trigger the mapping.
@@ -140,9 +140,9 @@ Follow the same process as before:
 **Terminal A** — Start DualMap
 ```bash
 cd DualMap
-conda activate dualmap
+source dualmap312/bin/activate
 
-source /opt/ros/humble/setup.bash
+source /opt/ros/jazzy/setup.bash
 python -m applications.runner_ros
 ```
 **Terminal B** — Start Habitat Data Collector
@@ -150,7 +150,7 @@ python -m applications.runner_ros
 cd <Path to >/habitat-data-collector
 conda activate habitat_data_collector
 
-source /opt/ros/humble/setup.bash
+source /opt/ros/jazzy/setup.bash
 python -m habitat_data_collector.main
 ```
 

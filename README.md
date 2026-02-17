@@ -21,7 +21,7 @@ The system supports multiple input sources, including offline datasets (**Datase
 
 ## Installation
 
-> ✅ Tested on **Ubuntu 22.04** with **ROS 2 Humble** and **Python 3.10**
+> ✅ Tested on **Ubuntu 24.04** with **ROS 2 Jazzy** and **Python 3.12**
 
 ### 1. Clone the Repository (with submodules)
 
@@ -31,11 +31,22 @@ cd DualMap
 ```
 >  Make sure to use `--recurse-submodules` to get `mobileclip`.
 
-### 2. Create Conda Environment
+### 2. Create Python Virtual Environment (Recommended due to ROS 2 Jazzy compatibility)
 ```bash
-conda env create -f environment.yml
-conda activate dualmap
+# Install venv if not present
+sudo apt install python3-venv
+
+# Create virtual environment
+python3 -m venv dualmap312
+
+# Activate environment
+source dualmap312/bin/activate
+
+# Install dependencies
+pip install -r requirements_py312.txt
 ```
+
+> **Note on NumPy**: This project requires `numpy<2.0` (specifically 1.26.x) due to ABI incompatibility with ROS 2 Jazzy's pre-built binaries. The `requirements_py312.txt` file handles this automatically. Do not upgrade numpy to 2.x manually.
 
 ### 3. Install MobileCLIP
 ```bash
@@ -43,16 +54,16 @@ cd 3rdparty/mobileclip
 pip install -e . --no-deps
 cd ../..
 ```
-> The system currently defaults to `MobileCLIP-v1`, and all reported results are based on `v1`.
-> Since August 2025, `MobileCLIP-v2` has been released, and the system also supports `v2`. You can set up the `v2` environment by following the instructions in [Apple’s MobileCLIP repository](https://github.com/apple/ml-mobileclip).
+> The system defaults to `MobileCLIP2-S2`.
+> Since August 2025, `MobileCLIP-v2` has been released, and the system now uses `v2` (specifically `MobileCLIP2-S2`) by default, which offers better performance.
 
 ### 4. (Optional) Setup ROS 2 Environment
 Setting up ROS2 environment for ROS support and applications.
-We recommend [ROS 2 Humble](https://docs.ros.org/en/humble/Installation.html).
+We recommend [ROS 2 Jazzy](https://docs.ros.org/en/jazzy/Installation.html).
 Once installed, activate the environment:
 
 ```bash
-source /opt/ros/humble/setup.bash
+source /opt/ros/jazzy/setup.bash
 ```
 
 > DualMap’s navigation functionality and real-world integration are based on ROS 2. **Installation is strongly recommended**.
