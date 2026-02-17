@@ -149,9 +149,21 @@ class Detector:
                     f"[Detector][Init] Loading CLIP model: {cfg.clip.model_name} with pretrained weights '{cfg.clip.pretrained}'"
                 )
 
+                # MobileCLIP2 S0/S2/B models need custom image normalization
+                model_kwargs = {}
+                model_name = cfg.clip.model_name
+                if model_name.startswith("MobileCLIP2") and not (
+                    model_name.endswith("S3")
+                    or model_name.endswith("S4")
+                    or model_name.endswith("L-14")
+                ):
+                    model_kwargs = {"image_mean": (0, 0, 0), "image_std": (1, 1, 1)}
+
                 self.clip_model, _, self.clip_preprocess = (
                     open_clip.create_model_and_transforms(
-                        cfg.clip.model_name, pretrained=cfg.clip.pretrained
+                        cfg.clip.model_name,
+                        pretrained=cfg.clip.pretrained,
+                        **model_kwargs,
                     )
                 )
                 self.clip_model = self.clip_model.to(cfg.device)

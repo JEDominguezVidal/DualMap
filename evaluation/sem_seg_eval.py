@@ -631,8 +631,16 @@ class Evaluator:
         print(
             f"[Evaluator] Loading CLIP model: {model_name} with pretrained weights '{pretrained}'"
         )
+        model_kwargs = {}
+        if model_name.startswith("MobileCLIP2") and not (
+            model_name.endswith("S3")
+            or model_name.endswith("S4")
+            or model_name.endswith("L-14")
+        ):
+            model_kwargs = {"image_mean": (0, 0, 0), "image_std": (1, 1, 1)}
+
         clip_model, _, _ = open_clip.create_model_and_transforms(
-            model_name, pretrained=pretrained
+            model_name, pretrained=pretrained, **model_kwargs
         )
         self.clip_model = clip_model.to(device)
         self.clip_model.eval()
