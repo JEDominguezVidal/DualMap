@@ -35,8 +35,11 @@ intrinsic:
 # If 'odom' gives the pose of the base_link, this matrix transforms points from
 # Camera Frame to Base Frame.
 # Structure: [[R00, R01, R02, Tx], [R10... Ty], [R20... Tz], [0, 0, 0, 1]]
+# Example for standard optical frame (Z-forward) mounted on Robot Base (X-forward)
+# Rotation: Camera Z (fwd) -> Base X (fwd) | Camera X (right) -> Base -Y (right) | Camera Y (down) -> Base -Z (down)
+# Translation: 0.3m forward (X), 0.2m up (Z)
 extrinsics:
-  - [1.0, 0.0, 0.0, 0.0]
-  - [0.0, 1.0, 0.0, 0.0]
-  - [0.0, 0.0, 1.0, 0.0]
+  - [0.0, 0.0, 1.0, 0.3]
+  - [-1.0, 0.0, 0.0, 0.0]
+  - [0.0, -1.0, 0.0, 0.2]
   - [0.0, 0.0, 0.0, 1.0]
