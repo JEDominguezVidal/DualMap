@@ -1,0 +1,42 @@
+dataset_name: 'ros2_rosbag'
+
+ros_topics:
+  # Topic name for RGB images (sensor_msgs/Image or CompressedImage)
+  rgb: "/rbkairos/front_rgbd_camera/color/image_raw"
+  # Topic name for Depth images (sensor_msgs/Image or CompressedImage)
+  depth: "/rbkairos/front_rgbd_camera/depth/image_raw"
+  # Topic name for Odometry (nav_msgs/Odometry)
+  # NOTE: DualMap requires an Odometry message. If you only have TF, 
+  # you must use a node to publish Odometry from TF.
+  odom: "/rbkairos/robotnik_base_control/odom"
+  # Topic name for CameraInfo (sensor_msgs/CameraInfo)
+  # Optional if 'intrinsic' is manually defined below.
+  camera_info: "/rbkairos/front_rgbd_camera/color/camera_info"
+
+# Depth factor: divisor to convert depth values to meters
+# - For 16UC1 (uint16) depth in millimeters (e.g., RealSense, Orbbec): use 1000.0
+# - For 32FC1 (float32) depth in meters (e.g., Isaac Sim, Gazebo): use 1.0
+depth_factor: 1000.0
+
+# Camera Intrinsic Parameters
+# FX, FY: Focal Lengths
+# CX, CY: Principal Point
+# NOTE: These values MUST match the resolution of the input images.
+# If these are provided, they take precedence over 'camera_info' topic.
+intrinsic:
+  fx: 509.1510009765625
+  fy: 318.6860046386719
+  cx: 509.1510009765625
+  cy: 243.8769989013672
+
+# Camera Extrinsic Parameters (Static Transform: Base -> Camera)
+# 4x4 Transformation Matrix (Row-major)
+# If the camera is mounted at the robot's base frame origin (Identity), you can omit this.
+# If 'odom' gives the pose of the base_link, this matrix transforms points from
+# Camera Frame to Base Frame.
+# Structure: [[R00, R01, R02, Tx], [R10... Ty], [R20... Tz], [0, 0, 0, 1]]
+extrinsics:
+  - [1.0, 0.0, 0.0, 0.0]
+  - [0.0, 1.0, 0.0, 0.0]
+  - [0.0, 0.0, 1.0, 0.0]
+  - [0.0, 0.0, 0.0, 1.0]

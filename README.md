@@ -107,6 +107,8 @@ DualMap supports input from both **ROS1** and **ROS2**. You can run the system w
 
 Follow the [ROS Runner Guide](resources/doc/app_runner_ros.md) to get started with running DualMap using ROS1/ROS2 rosbags or live ROS streams.
 
+> **Tip**: If you want to use your own rosbags, check out the [Custom Rosbag Guide](resources/doc/app_custom_rosbag.md).
+
 ### 🕹️ Online Mapping and Navigation in Simulation
 
 DualMap supports **online** interactive mapping and object navigation in simulation via the [Habitat Data Collector](https://github.com/Eku127/habitat-data-collector).
