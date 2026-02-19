@@ -1,0 +1,201 @@
+wall
+floor
+ceiling
+door
+window
+pillar
+stairs
+baseboard
+pipe
+vent
+handrail
+desk
+office chair
+table
+stool
+workbench
+cabinet
+bookshelf
+shelves
+couch
+armchair
+coffee table
+folding table
+rolling cart
+filing cabinet
+locker
+whiteboard
+bulletin board
+trash can
+recycling bin
+desktop computer
+monitor
+keyboard
+mouse
+laptop
+tablet
+smartphone
+desk lamp
+floor lamp
+server rack
+printer
+scanner
+projector
+projector screen
+network switch
+wifi router
+power strip
+extension cord
+wall plug
+wall clock
+telephone
+camera
+camera tripod
+microphone
+speaker
+book
+notebook
+paper
+folder
+binder
+pen
+pencil
+marker
+stapler
+tape dispenser
+scissors
+paper clip
+coffee mug
+water bottle
+coaster
+eyeglasses
+headphones
+backpack
+tote bag
+briefcase
+box
+cardboard box
+plastic bin
+tool box
+tool cart
+robot arm
+mobile base
+quadruped robot
+humanoid robot
+drone
+robot gripper
+end effector
+camera mount
+lidar
+depth camera
+stereo camera
+tactile sensor
+imu
+electric motor
+servo
+linear actuator
+battery
+battery charger
+power supply
+oscilloscope
+multimeter
+signal generator
+soldering iron
+solder wire
+flux
+breadboard
+printed circuit board
+microcontroller
+jumper wire
+wire spool
+wire stripper
+tweezers
+3d printer
+cnc machine
+laser cutter
+drill press
+band saw
+hand drill
+heat gun
+hot glue gun
+screwdriver
+wrench
+pliers
+hammer
+allen key
+calipers
+tape measure
+level
+vise
+clamp
+safety glasses
+ear muffs
+work gloves
+face shield
+screw
+nut
+bolt
+washer
+bearing
+gear
+pulley
+timing belt
+aluminum extrusion
+t nut
+bracket
+caster wheel
+zip tie
+duct tape
+electrical tape
+masking tape
+sandpaper
+acrylic sheet
+wood board
+metal plate
+foam block
+bubble wrap
+calibration board
+april tag
+mocap marker
+mocap camera
+joystick
+gamepad
+experiment setup
+optical table
+coffee maker
+microwave
+refrigerator
+water cooler
+kettle
+sink
+soap dispenser
+paper towel
+cloth towel
+sponge
+dish rack
+fire extinguisher
+first aid kit
+exit sign
+broom
+dustpan
+mop
+mop bucket
+vacuum cleaner
+wet floor sign
+person
+coat
+jacket
+hat
+shoe
+umbrella
+picture
+poster
+blinds
+curtain
+indoor plant
+plant pot
+radiator
+light switch
+smoke detector
+picture frame
+unknown
