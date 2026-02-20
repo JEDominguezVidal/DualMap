@@ -403,7 +403,7 @@ class Detector:
         translation_diff = np.linalg.norm(
             curr_pose[:3, 3] - prev_kf_pose[:3, 3]
         )  # Translation difference
-        if translation_diff >= 1.0:
+        if translation_diff >= self.cfg.layout_translation_threshold:
             logger.info(
                 f"[Detector][Layout] Candidate Frame for layout calculation -- translation: {translation_diff}"
             )
@@ -415,7 +415,7 @@ class Detector:
         rotation_diff = curr_rotation.inv() * last_rotation
         angle_diff = rotation_diff.magnitude() * (180 / np.pi)
 
-        if angle_diff >= 20:
+        if angle_diff >= self.cfg.layout_rotation_threshold:
             logger.info(
                 f"[Detector][Layout] Candidate Frame for layout calculation -- rotation: {angle_diff}"
             )

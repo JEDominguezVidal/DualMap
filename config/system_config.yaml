@@ -22,7 +22,8 @@ yolo:
 
   ## The given classes lists
   ## Indoor Classes List
-  given_classes_path: ./config/class_list/hm3d300_classes_ycb.txt
+  # given_classes_path: ./config/class_list/hm3d300_classes_ycb.txt
+  given_classes_path: ./config/class_list/gpt_rosbag_indoor_lab.txt
   # given_classes_path: ./config/class_list/gpt_indoor_office.txt
   # given_classes_path: ./config/class_list/gpt_indoor_apartment.txt
   # given_classes_path: ./config/class_list/gpt_indoor_classroom.txt
@@ -85,7 +86,7 @@ show_3d_bbox_overlapped: False
 ## FastSAM Settings
 # Use FastSAM for Open-Voca supplementation
 use_fastsam: True
-fastsam_confidence: 0.80
+fastsam_confidence: 0.50
 # Display FastSAM debug outputs on Rerun
 show_fastsam_debug: False
 
@@ -202,6 +203,8 @@ save_cropped: False
 ### LAYOUT CONFIG
 layout_voxel_size: 0.05 
 save_layout: True
+layout_translation_threshold: 1.0
+layout_rotation_threshold: 20.0
 
 # ============================================================
 # PRELOADING CONFIG
