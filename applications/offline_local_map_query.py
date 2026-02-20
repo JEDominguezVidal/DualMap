@@ -3,6 +3,11 @@ import json
 import os
 import sys
 
+# Add the project's root directory to sys.path to enable module imports
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
 import hydra
 import matplotlib
 import numpy as np
@@ -145,36 +150,40 @@ def main(cfg: DictConfig):
 
     print(f"Obj Map length: %d" % len(obj_map))
 
+    # Save original RGB colours for rapid switching
+    for obj in obj_map:
+        obj.original_colors = np.asarray(obj.pcd.colors).copy()
+
     view_param = None
     if os.path.exists(viewpoint_path):
         print(f"Loading saved viewpoint from {viewpoint_path}")
         view_param = o3d.io.read_pinhole_camera_parameters(viewpoint_path)
         vis.get_view_control().convert_from_pinhole_camera_parameters(view_param)
 
-    # variables for query sim color map
-    queried_color_objs = []
-    highlighted_objs = []
+    # State class for rapid query colour updates
+    class QueryState:
+        top_1_idx = None
+        similarity_colors = None
+
+    state = QueryState()
 
     def pcd_sem_color_callback(vis):
-        print("Show the Pointcloud with semantic colors")
-        vis.clear_geometries()
+        print("Show the Pointcloud with semantic colours")
         for obj in obj_map:
-            sem_pcd = copy.deepcopy(obj.pcd)
             color = class_id_colors[obj.class_id]
-            vis.add_geometry(sem_pcd.paint_uniform_color(color))
-        reset_view()
+            obj.pcd.paint_uniform_color(color)
+            vis.update_geometry(obj.pcd)
 
     def pcd_rgb_color_callback(vis):
-        print("Show the Pointcloud with RGB colors")
-        vis.clear_geometries()
+        print("Show the Pointcloud with RGB colours")
         for obj in obj_map:
-            vis.add_geometry(obj.pcd)
-        reset_view()
+            obj.pcd.colors = o3d.utility.Vector3dVector(obj.original_colors)
+            vis.update_geometry(obj.pcd)
 
     ### Visualization exit
     def vis_exit_callback(vis):
+        print("Exiting visualizer...")
         vis.destroy_window()
-        sys.exit(0)
 
     def query_callback(vis):
         text_query = input("Enter your query: ")
@@ -201,7 +210,7 @@ def main(cfg: DictConfig):
         cos_sim = F.cosine_similarity(text_query_ft.unsqueeze(0), map_clip_fts, dim=-1)
 
         ## Get top k candidates
-        top_k = 1
+        top_k = 5
         top_k_cos_sim, top_k_idx = torch.topk(cos_sim, top_k, dim=0)
         print("Top 5 similar objects:")
         for i, (cos_val, idx) in enumerate(
@@ -211,61 +220,35 @@ def main(cfg: DictConfig):
                 f"{i+1}. No. {idx} {class_id_names[obj_map[idx].class_id]}: {cos_val:.3f}"
             )
 
-        ## Save the highlighted objects with top5 in red color
-        global highlighted_objs
-        highlighted_objs = []
-        for idx, obj in enumerate(obj_map):
-            temp_obj = copy.deepcopy(obj)
-            if idx in top_k_idx.tolist():
-                color = [1.0, 0.0, 0.0]  # Red color
-                temp_obj.pcd.paint_uniform_color(color)
-            highlighted_objs.append(temp_obj)
-
+        ## Save explicitly the #1 match for highlighting
+        state.top_1_idx = top_k_idx.tolist()[0]
+        
         max_value = cos_sim.max()
         min_value = cos_sim.min()
         normalized_similarities = (cos_sim - min_value) / (max_value - min_value)
-        similarity_colors = cmap(normalized_similarities.detach().cpu().numpy())[
+        state.similarity_colors = cmap(normalized_similarities.detach().cpu().numpy())[
             ..., :3
         ]
-
-        ## Save the colored objects
-        global queried_color_objs
-        queried_color_objs = []
-        for idx, obj in enumerate(obj_map):
-            temp_obj = copy.deepcopy(obj)
-            # change the color in temp_obj
-            temp_obj.pcd.colors = o3d.utility.Vector3dVector(
-                np.tile(
-                    [
-                        similarity_colors[idx, 0].item(),
-                        similarity_colors[idx, 1].item(),
-                        similarity_colors[idx, 2].item(),
-                    ],
-                    (len(temp_obj.pcd.points), 1),
-                )
-            )
-            queried_color_objs.append(temp_obj)
-
-        ### visualization
-        vis.clear_geometries()
-        for obj in highlighted_objs:
-            vis.add_geometry(obj.pcd)
-
-        reset_view()
+        
+        highlight_objs_callback(vis)
 
     def highlight_objs_callback(vis):
-        global highlighted_objs
-        vis.clear_geometries()
-        for obj in highlighted_objs:
-            vis.add_geometry(obj.pcd)
-        reset_view()
+        print("Highlighting top match in red")
+        for idx, obj in enumerate(obj_map):
+            if idx == state.top_1_idx:
+                obj.pcd.paint_uniform_color([1.0, 0.0, 0.0])  # Red
+            else:
+                obj.pcd.colors = o3d.utility.Vector3dVector(obj.original_colors)
+            vis.update_geometry(obj.pcd)
 
     def queried_color_objs_callback(vis):
-        global queried_color_objs
-        vis.clear_geometries()
-        for obj in queried_color_objs:
-            vis.add_geometry(obj.pcd)
-        reset_view()
+        print("Switching to similarity heat map")
+        if state.similarity_colors is None:
+            return
+        for idx, obj in enumerate(obj_map):
+            color = state.similarity_colors[idx]
+            obj.pcd.paint_uniform_color(color.tolist())
+            vis.update_geometry(obj.pcd)
 
     def help_callback(vis):
         help_info = """
@@ -294,13 +277,21 @@ def main(cfg: DictConfig):
             vis.get_view_control().convert_from_pinhole_camera_parameters(view_param)
 
     vis.register_key_callback(ord("Q"), vis_exit_callback)
+    vis.register_key_callback(ord("q"), vis_exit_callback)
     vis.register_key_callback(ord("R"), pcd_rgb_color_callback)
+    vis.register_key_callback(ord("r"), pcd_rgb_color_callback)
     vis.register_key_callback(ord("C"), pcd_sem_color_callback)
+    vis.register_key_callback(ord("c"), pcd_sem_color_callback)
     vis.register_key_callback(ord("F"), query_callback)
+    vis.register_key_callback(ord("f"), query_callback)
     vis.register_key_callback(ord("N"), highlight_objs_callback)
+    vis.register_key_callback(ord("n"), highlight_objs_callback)
     vis.register_key_callback(ord("M"), queried_color_objs_callback)
+    vis.register_key_callback(ord("m"), queried_color_objs_callback)
     vis.register_key_callback(ord("H"), help_callback)
+    vis.register_key_callback(ord("h"), help_callback)
     vis.register_key_callback(ord("S"), save_view_callback)
+    vis.register_key_callback(ord("s"), save_view_callback)
 
     help_callback(vis)
 
