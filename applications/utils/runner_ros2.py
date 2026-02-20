@@ -137,6 +137,11 @@ class RunnerROS2(Node, RunnerROSBase):
 
     def destroy_node(self):
         """Override base destroy_node with cleanup logic."""
+        if not self.shutdown_requested:
+            self.logger.warning("[Main] Shutting down abruptly. Triggering end_process() to save maps.")
+            self.dualmap.end_process()
+            self.shutdown_requested = True
+            
         self.shutdown_all_threads()
         super().destroy_node()
 
