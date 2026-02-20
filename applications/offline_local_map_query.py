@@ -17,6 +17,15 @@ import torch
 import torch.nn.functional as F
 from omegaconf import DictConfig, OmegaConf
 
+# Intercept and remove custom argument to avoid Hydra conflicts
+global_top_k = 5
+if "--top_k" in sys.argv:
+    idx = sys.argv.index("--top_k")
+    if idx + 1 < len(sys.argv):
+        global_top_k = int(sys.argv[idx + 1])
+        sys.argv.pop(idx)  # remove --top_k flag
+        sys.argv.pop(idx)  # remove its value
+
 from utils.object import BaseObject
 
 
@@ -210,9 +219,11 @@ def main(cfg: DictConfig):
         cos_sim = F.cosine_similarity(text_query_ft.unsqueeze(0), map_clip_fts, dim=-1)
 
         ## Get top k candidates
-        top_k = 5
+        top_k = global_top_k
+        top_k = min(top_k, len(obj_map)) # Ensure we don't ask for more than we have
+        
         top_k_cos_sim, top_k_idx = torch.topk(cos_sim, top_k, dim=0)
-        print("Top 5 similar objects:")
+        print(f"Top {top_k} similar objects:")
         for i, (cos_val, idx) in enumerate(
             zip(top_k_cos_sim.tolist(), top_k_idx.tolist())
         ):
