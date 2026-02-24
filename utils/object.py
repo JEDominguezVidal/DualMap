@@ -697,8 +697,15 @@ class LocalObject(BaseObject):
         # get all z_zxis value
         z_axis = np.asarray(self.pcd.points)[:, 2]
 
+        z_min = z_axis.min()
+        z_max = z_axis.max()
+
+        # Fallback for synthetic/flat point clouds (e.g. from Depth-Anything)
+        if (z_max - z_min) < bin_size:
+            return float(z_axis[0])
+
         # Get the bin count
-        bin_edges = np.arange(z_axis.min(), z_axis.max() + bin_size, bin_size)
+        bin_edges = np.arange(z_min, z_max + bin_size, bin_size)
 
         # Histogram calculation
         hist, bin_edges = np.histogram(z_axis, bins=bin_edges)
