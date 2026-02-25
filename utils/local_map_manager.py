@@ -369,8 +369,9 @@ class LocalMapManager(BaseMapManager):
                 # restrict unknown
                 if self.cfg.restrict_unknown_labels and class_name == "unknown":
                     self.to_be_eliminated.add(obj.uid)
-                    for related_obj in related_objs:
-                        self.to_be_eliminated.add(related_obj.uid)
+                    # [Semantic Compression] Uncomment to let Parent absorb nested Unknown objects
+                    # for related_obj in related_objs:
+                    #     self.to_be_eliminated.add(related_obj.uid)
                     return
 
                 # generate global observation and insert to global obs list
@@ -381,9 +382,10 @@ class LocalMapManager(BaseMapManager):
 
                 self.to_be_eliminated.add(obj.uid)
 
+                # [Semantic Compression] Uncomment to let Parent absorb and physically delete Nested Objects from the final map
                 # Delete all the related objs
-                for related_obj in related_objs:
-                    self.to_be_eliminated.add(related_obj.uid)
+                # for related_obj in related_objs:
+                #     self.to_be_eliminated.add(related_obj.uid)
 
             return
 
