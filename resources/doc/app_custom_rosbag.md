@@ -115,3 +115,14 @@ You can create your own class list text file if needed.
     source /opt/ros/jazzy/setup.bash
     ros2 bag play path/to/your/rosbag
     ```
+
+## 5. Save and Visualise the Semantic Map
+
+Once your rosbag finishes playing or you stop your live RealSense camera stream, press `Ctrl+C` in the terminal running DualMap to safely terminate the node. The system will automatically flush and save the local/global `.pkl` objects and the `layout.pcd` point cloud.
+
+To visualise the resulting 3D semantic map and perform natural language queries over it, use the offline query tool:
+
+```bash
+python applications/offline_local_map_query.py map_dir=./output/map_results/<dataset>_<scene>/map
+```
+*(Check your `system_config.yaml` to confirm the exact `<dataset>_<scene>` folder name used for the output).*

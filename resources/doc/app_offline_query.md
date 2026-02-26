@@ -39,8 +39,23 @@ map_dir: "<PATH TO MAP>"
 ```
 ### Run the query application
 
+```bash
+python applications/offline_local_map_query.py
 ```
-python -m applications.offline_local_map_query
+
+By default, the query tool will display the Top 5 matches in the terminal and highlight the absolute best match (#1) in red on the 3D window. You can change the number of matches computed via the `--top_k` parameter:
+```bash
+python applications/offline_local_map_query.py --top_k 3
+```
+
+## Querying Custom ROS/RealSense Maps
+When you run DualMap using your own custom ROS nodes or RealSense cameras, the final map is saved to disk once the ROS runner node is terminated (`Ctrl+C`). 
+
+By default, these maps are saved following the `config/system_config.yaml` output path structure: `./output/map_results/<dataset>_<scene>/map`.
+
+To visualise your custom generated map, simply edit `config/query_config.yaml` and set `map_dir` to your output directory, or override it directly from the terminal via Hydra:
+```bash
+python applications/offline_local_map_query.py map_dir=./output/map_results/my_rosbag_run/map
 ```
 
 ## Usage
