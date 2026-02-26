@@ -651,7 +651,14 @@ class Dualmap:
 
         # save the global mapping results
         if self.cfg.save_global_map:
-            self.global_map_manager.save_map()
+            # Only save global map if NOT also saving local map,
+            # to avoid overwriting local .pkl files in the same directory.
+            if not self.cfg.save_local_map:
+                self.global_map_manager.save_map()
+            else:
+                logger.warning(
+                    "[Core] Skipping global map save to prevent overwriting local map files in the same directory."
+                )
 
         if self.cfg.save_layout:
             self.detector.save_layout()
