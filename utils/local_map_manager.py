@@ -312,8 +312,20 @@ class LocalMapManager(BaseMapManager):
             # Get all the related objects in the graph
             related_objs = self.get_related_objects(obj.uid)
 
-            # if no related objects, delete the current object and return
+            # if no related objects, promote to global and delete from local
             if len(related_objs) == 0:
+
+                class_name = self.visualizer.obj_classes.get_classes_arr()[obj.class_id]
+
+                # restrict unknown
+                if self.cfg.restrict_unknown_labels and class_name == "unknown":
+                    self.to_be_eliminated.add(obj.uid)
+                    return
+
+                # generate global observation and insert to global obs list
+                global_obs = self.create_global_observation(obj)
+                self.global_observations.append(global_obs)
+
                 self.to_be_eliminated.add(obj.uid)
                 return
 
