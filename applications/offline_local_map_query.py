@@ -179,7 +179,7 @@ def main(cfg: DictConfig):
     def pcd_sem_color_callback(vis):
         print("Show the Pointcloud with semantic colours")
         for obj in obj_map:
-            color = class_id_colors[obj.class_id]
+            color = class_id_colors.get(obj.class_id, [0.5, 0.5, 0.5]) # Default to grey if class missing
             obj.pcd.paint_uniform_color(color)
             vis.update_geometry(obj.pcd)
 
@@ -227,8 +227,9 @@ def main(cfg: DictConfig):
         for i, (cos_val, idx) in enumerate(
             zip(top_k_cos_sim.tolist(), top_k_idx.tolist())
         ):
+            class_name = class_id_names.get(obj_map[idx].class_id, f"Unknown_Class_{obj_map[idx].class_id}")
             print(
-                f"{i+1}. No. {idx} {class_id_names[obj_map[idx].class_id]}: {cos_val:.3f}"
+                f"{i+1}. No. {idx} {class_name}: {cos_val:.3f}"
             )
 
         ## Save explicitly the #1 match for highlighting
