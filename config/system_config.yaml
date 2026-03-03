@@ -74,7 +74,7 @@ use_rerun: True
 # Enable object detection during mapping
 run_detection: True
 # Save detection results to disk
-save_detection: False
+save_detection: True
 # detection saving and loading directory
 detection_path: ${output_path}/${dataset_name}_${scene_id}/detections
 # Show detection results on Rerun during runtime
@@ -95,7 +95,7 @@ show_fastsam_debug: False
 # skip refinement will be faster but less accurate
 skip_refinement: False
 # small mask filtering threshold
-small_mask_th: 204
+small_mask_th: 20
 
 
 ## Feature Settings
@@ -110,12 +110,11 @@ use_avg_feat_for_unknown: True
 # minimum points threshold for object's PCD
 min_points_threshold: 5
 # pcd params
-downsample_voxel_size: 0.02
+downsample_voxel_size: 0.01
 dbscan_remove_noise: !!bool True
-dbscan_eps: 0.1
-dbscan_min_points: 10
-pcd_sample_ratio: 0.04
-
+dbscan_eps: 0.10
+dbscan_min_points: 5
+pcd_sample_ratio: 0.10
 
 ### MATCHING CONFIG
 # similarity threshold for matching
@@ -158,7 +157,7 @@ downsample_interval: 3
 max_common_th: 6
 max_pending_count: 5
 # Param for Stability Check
-stable_num: 8
+stable_num: 3
 
 
 ### GLOBAL OBJECTS CONFIG --> ANCHOR OBJECTS
@@ -183,7 +182,7 @@ use_parallel: True
 ### GENERAL MAP CONFIG
 # If True, run local mapping only and get local map
 # If False, run both local and global mapping and get global map
-run_local_mapping_only: True
+run_local_mapping_only: False
 # Post 3D-level merging between objects, just like ConceptGraphs and HOV-SG
 # If True, the system will merge the local objects with similarity.
 merge_local_map: False
@@ -203,8 +202,8 @@ save_cropped: False
 ### LAYOUT CONFIG
 layout_voxel_size: 0.05 
 save_layout: True
-layout_translation_threshold: 1.0
-layout_rotation_threshold: 20.0
+layout_translation_threshold: 0.3
+layout_rotation_threshold: 10.0
 
 # ============================================================
 # PRELOADING CONFIG

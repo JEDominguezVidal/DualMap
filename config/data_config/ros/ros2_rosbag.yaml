@@ -5,6 +5,8 @@ ros_topics:
   rgb: "/rbkairos/front_rgbd_camera/color/image_raw"
   # Topic name for Depth images (sensor_msgs/Image or CompressedImage)
   depth: "/rbkairos/front_rgbd_camera/depth/image_raw"
+  # depth: "/depth_anything_3/depth"
+  # depth: "/cdm/depth_enhanced"
   # Topic name for Odometry (nav_msgs/Odometry)
   # NOTE: DualMap requires an Odometry message. If you only have TF, 
   # you must use a node to publish Odometry from TF.
@@ -23,11 +25,11 @@ depth_factor: 1000.0
 # CX, CY: Principal Point
 # NOTE: These values MUST match the resolution of the input images.
 # If these are provided, they take precedence over 'camera_info' topic.
-intrinsic:
-  fx: 509.1510009765625
-  fy: 318.6860046386719
-  cx: 509.1510009765625
-  cy: 243.8769989013672
+# intrinsic:
+#   fx: 509.1510009765625
+#   fy: 318.6860046386719
+#   cx: 509.1510009765625
+#   cy: 243.8769989013672
 
 # Camera Extrinsic Parameters (Static Transform: Base -> Camera)
 # 4x4 Transformation Matrix (Row-major)
@@ -39,7 +41,7 @@ intrinsic:
 # Rotation: Camera Z (fwd) -> Base X (fwd) | Camera X (right) -> Base -Y (right) | Camera Y (down) -> Base -Z (down)
 # Translation: 0.3m forward (X), 0.2m up (Z)
 extrinsics:
-  - [0.0, 0.0, 1.0, 0.3]
+  - [0.0, 0.0, 1.0, 0.0]
   - [-1.0, 0.0, 0.0, 0.0]
-  - [0.0, -1.0, 0.0, 0.2]
+  - [0.0, -1.0, 0.0, 0.0]
   - [0.0, 0.0, 0.0, 1.0]

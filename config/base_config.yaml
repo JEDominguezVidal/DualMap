@@ -8,11 +8,11 @@
 # dataset_conf_path: config/data_config/dataset/self_collected.yaml
 
 ## Replica Dataset
-dataset_name: replica
-scene_id: room_0
-dataset_path: dataset/Replica
-dataset_conf_path: config/data_config/dataset/replica.yaml
-dataset_gt_path: dataset/Replica-Dataset/Replica_original
+# dataset_name: replica
+# scene_id: room_0
+# dataset_path: dataset/Replica
+# dataset_conf_path: config/data_config/dataset/replica.yaml
+# dataset_gt_path: dataset/Replica-Dataset/Replica_original
 
 ## ScanNet Dataset
 # dataset_name: scannet
@@ -27,6 +27,22 @@ dataset_gt_path: dataset/Replica-Dataset/Replica_original
 # dataset_path: dataset/TUM_RGBD
 # dataset_conf_path: config/data_config/dataset/tum_rgbd.yaml
 
+# ============================================================
+# ROS CONFIG
+# ============================================================
+dataset_name: kairos
+scene_id: experimental_room_depth_anything_normalized_5
+# # Static scene at Floor 0
+# dataset_name: rosbag
+# scene_id: rosbag_realsense_floor_0_depth_enhanced_1
+
+# # Static scene at experimental room
+# dataset_name: kairos
+# scene_id: experimental_room_depth_anything_normalized_2
+
+# # Static scene at experimental room with better depth estimation
+# dataset_name: kairos
+# scene_id: experimental_room_depth_anything_normalized_4
 
 # ============================================================
 # OUTPUT CONFIG

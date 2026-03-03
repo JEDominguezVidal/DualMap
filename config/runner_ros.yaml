@@ -14,13 +14,14 @@ ros_rate: 15
 # Path to ROS topic configuration file
 # ros_stream_config_path: ./config/data_config/ros/self_collected.yaml
 ros_stream_config_path: ./config/data_config/ros/ros2_rosbag.yaml
+# ros_stream_config_path: ./config/data_config/ros/realsense.yaml
 
 # If RGB & Depth topics are published as compressed image topics, set to true
 # If false, topics are expected to be raw image topics
 use_compressed_topic: false
 
 # Maximum allowed time difference (in seconds) between synchronized topics
-sync_threshold: 0.1
+sync_threshold: 0.5
 
 
 # ============================================================
@@ -31,10 +32,10 @@ sync_threshold: 0.1
 run_detection: True
 
 # Show detection results on Rerun during runtime
-visualize_detection: False
+visualize_detection: true
 
 # Use FastSAM for Open-Voca supplementation
-use_fastsam: False
+use_fastsam: false
 
 # Detection Refinement
 # skip refinement will be faster but less accurate
@@ -44,7 +45,7 @@ skip_refinement: false
 # Enable Rerun visualization
 use_rerun: true
 # Enable Rviz visualization
-use_rviz: false
+use_rviz: true
 
 ## Parallelization
 # Use parallel processing (False = sequential)

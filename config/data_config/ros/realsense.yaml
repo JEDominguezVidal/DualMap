@@ -2,7 +2,8 @@ dataset_name: 'realsense'
 
 ros_topics:
   rgb: "/camera/camera/color/image_raw"
-  depth: "/camera/camera/aligned_depth_to_color/image_raw"
+  #depth: "/camera/camera/aligned_depth_to_color/image_raw"
+  depth: "/cdm/depth_enhanced"
   odom: "/camera/pose"
   camera_info: "/camera/camera/color/camera_info"
 
@@ -11,11 +12,15 @@ ros_topics:
 # - For 32FC1 (float32) depth in meters (e.g., Isaac Sim, Gazebo): use 1.0
 depth_factor: 1000.0
 
-intrinsic:
-  fx: 916.39111328125
-  fy: 646.473876953125
-  cx: 914.662353515625
-  cy: 363.88116455078125
+# intrinsic:
+#   # fx: 916.39111328125
+#   # fy: 646.473876953125
+#   # cx: 914.662353515625
+#   # cy: 363.88116455078125
+#   fx: 610.9274291992188
+#   fy: 324.31591796875
+#   cx: 609.77490234375
+#   cy: 242.5874481201172
 
 # Camera Extrinsic Parameters (Static Transform: Base -> Camera)
 # 4x4 Transformation Matrix (Row-major)
