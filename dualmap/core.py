@@ -614,6 +614,13 @@ class Dualmap:
         # end duration
         end_range = self.cfg.active_window_size + self.cfg.max_pending_count + 1
 
+        # Merge duplicate local objects BEFORE the elimination loop drains them
+        with timing_context("Merging", self):
+            if self.cfg.merge_local_map:
+                self.local_map_manager.merge_local_map()
+                self.visualizer.set_time_sequence("frame", end_frame_id + 1)
+                logger.info("[Core][EndProcess] Local Map Merged")
+
         for i in range(end_range):
             # Set timestamp for visualizer
             logger.info("[Core][EndProcess] End Counter: %d", end_frame_id + i + 1)
@@ -638,12 +645,6 @@ class Dualmap:
                     "[EndProcess] End Processing End. to: %d", end_frame_id + i + 1
                 )
                 break
-
-        with timing_context("Merging", self):
-            if self.cfg.merge_local_map:
-                self.local_map_manager.merge_local_map()
-                self.visualizer.set_time_sequence("frame", end_range + 1)
-                logger.info("[Core][EndProcess] Local Map Merged")
 
         # save the local mapping results
         if self.cfg.save_local_map:
