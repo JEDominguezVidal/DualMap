@@ -116,6 +116,13 @@ dbscan_eps: 0.10
 dbscan_min_points: 5
 pcd_sample_ratio: 0.10
 
+# ICP Alignment Settings for objects
+use_icp_alignment: True
+icp_voxel_size: 0.05
+icp_distance_threshold: 0.2
+icp_min_points: 10
+icp_fitness_threshold: 0.4
+
 ### MATCHING CONFIG
 # similarity threshold for matching
 sim_threshold: 1.2

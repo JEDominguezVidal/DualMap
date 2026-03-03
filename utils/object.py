@@ -357,6 +357,28 @@ class LocalObject(BaseObject):
 
         # Get outside infomations
         # Merge pcd
+        # Apply ICP alignment if enabled to prevent ghosting/multi-layer artifacts
+        if getattr(self._cfg, 'use_icp_alignment', False) and len(self.pcd.points) > 0 and len(latest_obs.pcd.points) > 0:
+            try:
+                # Downsample for faster and more robust ICP
+                source_down = latest_obs.pcd.voxel_down_sample(voxel_size=self._cfg.icp_voxel_size)
+                target_down = self.pcd.voxel_down_sample(voxel_size=self._cfg.icp_voxel_size)
+                
+                icp_min_points = getattr(self._cfg, 'icp_min_points', 10)
+                if len(source_down.points) > icp_min_points and len(target_down.points) > icp_min_points:
+                    reg_p2p = o3d.pipelines.registration.registration_icp(
+                        source_down, target_down, self._cfg.icp_distance_threshold, np.eye(4),
+                        o3d.pipelines.registration.TransformationEstimationPointToPoint(),
+                        o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=50)
+                    )
+                    
+                    # Apply transformation if alignment is reasonable
+                    icp_fitness_threshold = getattr(self._cfg, 'icp_fitness_threshold', 0.3)
+                    if reg_p2p.fitness > icp_fitness_threshold:
+                        latest_obs.pcd.transform(reg_p2p.transformation)
+            except Exception as e:
+                logger.warning(f"[LocalObject] ICP alignment failed: {e}")
+
         # Simply add
         self.pcd += latest_obs.pcd
 
