@@ -537,8 +537,11 @@ class LocalObject(BaseObject):
     def update_info_from_observations(
         self,
     ) -> None:
-        # This function will be used to update the object class info based on all observations
-        # ALso can use iteration of the update_info function
+        # This function rebuilds the entire object state from its stored observations.
+        # It is used by merge_local_object() after combining observations from multiple
+        # duplicate objects into a single new LocalObject.
+        # IMPORTANT: This must reconstruct ALL fields that __getstate__ serialises,
+        # including pcd_2d and bbox_2d, which are required for correct deserialisation.
         counter = 0
         for obs in self.observations:
             counter += 1
@@ -562,6 +565,26 @@ class LocalObject(BaseObject):
 
         # self.bbox = self.pcd.get_oriented_bounding_box(robust=True)
         self.bbox = self.pcd.get_axis_aligned_bounding_box()
+
+        # Rebuild pcd_2d from observations.
+        # pcd_2d is the 2D projection point cloud used by GlobalObject for
+        # bounding box visualisation and class-weighted merging. Without this,
+        # merged objects would have an empty pcd_2d, causing a RuntimeError
+        # when __setstate__ tries to deserialise the saved .pkl file.
+        if hasattr(self, 'pcd_2d'):
+            pcd_2d_counter = 0
+            for obs in self.observations:
+                if hasattr(obs, 'pcd_2d') and len(obs.pcd_2d.points) > 0:
+                    pcd_2d_counter += 1
+                    if pcd_2d_counter == 1:
+                        self.pcd_2d = obs.pcd_2d
+                    else:
+                        self.pcd_2d += obs.pcd_2d
+            if pcd_2d_counter > 0:
+                self.pcd_2d = self.voxel_downsample_2d(
+                    pcd=self.pcd_2d, voxel_size=self._cfg.downsample_voxel_size
+                )
+                self.bbox_2d = self.pcd_2d.get_axis_aligned_bounding_box()
 
         # norm feat
         self.clip_ft = (self.clip_ft) * 1.0 / (self.observed_num)
@@ -797,13 +820,23 @@ class GlobalObject(BaseObject):
         # Restore related_objs as np.ndarray
         self.related_objs = [np.array(arr) for arr in state.get("related_objs", [])]
 
-        # Restore pcd_2d (points and colors)
-        points = np.array(state.get("pcd_2d_points"))
-        colors = np.array(state.get("pcd_2d_colors"))
+        # Restore pcd_2d (points and colours).
+        # When an object was merged via update_info_from_observations() and no
+        # observations had a valid pcd_2d, the serialised arrays will be empty lists.
+        # np.array([]) produces shape (0,) which Open3D's Vector3dVector cannot accept
+        # (it requires (N, 3)). We guard against this by only assigning points/colours
+        # when the array is non-empty and correctly shaped.
+        raw_points = state.get("pcd_2d_points", [])
+        raw_colors = state.get("pcd_2d_colors", [])
 
         self.pcd_2d = o3d.geometry.PointCloud()
-        self.pcd_2d.points = o3d.utility.Vector3dVector(points)
-        self.pcd_2d.colors = o3d.utility.Vector3dVector(colors)
+        if len(raw_points) > 0:
+            points = np.array(raw_points)
+            colors = np.array(raw_colors)
+            if points.ndim == 2 and points.shape[1] == 3:
+                self.pcd_2d.points = o3d.utility.Vector3dVector(points)
+            if colors.ndim == 2 and colors.shape[1] == 3:
+                self.pcd_2d.colors = o3d.utility.Vector3dVector(colors)
 
         self.bbox_2d = self.pcd_2d.get_axis_aligned_bounding_box()
 
