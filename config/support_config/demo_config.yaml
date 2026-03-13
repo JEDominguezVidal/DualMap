@@ -43,8 +43,6 @@ use_remove_sharp_turns: true
 # show global obj 3d bbox in rerun
 show_global_map_3d_bbox: false
 
-# restrict unknown labels
-restrict_unknown_labels: true
 
 # Save the calculcated local_path, global_path, and action_path
 save_all_path: true

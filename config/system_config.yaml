@@ -134,6 +134,9 @@ use_fastsam: True
 fastsam_confidence: 0.50
 # Display FastSAM debug outputs on Rerun (masks, bounding boxes)
 show_fastsam_debug: True
+# Whether to restrict promotion of "unknown" objects to the global map.
+# Set to False to allow FastSAM objects to be saved even if not identified by YOLO.
+restrict_unknown_labels: false
 
 
 ## Detection Refinement
