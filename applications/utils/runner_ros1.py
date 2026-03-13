@@ -3,9 +3,11 @@
 import logging
 import threading
 import time
+from collections import deque
 
 import numpy as np
 import rospy
+import tf
 from cv_bridge import CvBridge
 from message_filters import ApproximateTimeSynchronizer, Subscriber
 from nav_msgs.msg import Odometry
@@ -50,15 +52,39 @@ class RunnerROS1(RunnerROSBase):
             self.rgb_sub = Subscriber(self.dataset_cfg.ros_topics.rgb, Image)
             self.depth_sub = Subscriber(self.dataset_cfg.ros_topics.depth, Image)
 
-        self.odom_sub = Subscriber(self.dataset_cfg.ros_topics.odom, Odometry)
+        # Detect pose mode: Odometry topic vs TF lookup
+        self.use_tf_mode = not hasattr(self.dataset_cfg.ros_topics, 'odom')
 
-        # Sync RGB + Depth + Odometry
-        self.sync = ApproximateTimeSynchronizer(
-            [self.rgb_sub, self.depth_sub, self.odom_sub],
-            queue_size=10,
-            slop=self.cfg.sync_threshold,
-        )
-        self.sync.registerCallback(self.synced_callback)
+        if self.use_tf_mode:
+            # TF mode: obtain camera pose from tf transforms
+            self.logger.warning("[Main] No 'odom' topic defined. Using TF mode for camera pose.")
+            self.tf_listener = tf.TransformListener()
+            self.tf_source_frame = self.dataset_cfg.tf_source_frame
+            self.tf_target_frame = self.dataset_cfg.tf_target_frame
+            self.tf_mode_queue = deque()
+            self.logger.warning(
+                f"[Main] TF lookup: '{self.tf_source_frame}' -> '{self.tf_target_frame}'"
+            )
+
+            # Sync only RGB + Depth (no Odometry)
+            self.sync = ApproximateTimeSynchronizer(
+                [self.rgb_sub, self.depth_sub],
+                queue_size=10,
+                slop=self.cfg.sync_threshold,
+            )
+            self.sync.registerCallback(self.synced_callback_tf)
+        else:
+            # Odometry mode: original behaviour
+            self.logger.warning("[Main] Using Odometry topic for camera pose.")
+            self.odom_sub = Subscriber(self.dataset_cfg.ros_topics.odom, Odometry)
+
+            # Sync RGB + Depth + Odometry
+            self.sync = ApproximateTimeSynchronizer(
+                [self.rgb_sub, self.depth_sub, self.odom_sub],
+                queue_size=10,
+                slop=self.cfg.sync_threshold,
+            )
+            self.sync.registerCallback(self.synced_callback)
 
         # Fallback to camera_info topic if intrinsics not loaded
         rospy.Subscriber(
@@ -68,7 +94,7 @@ class RunnerROS1(RunnerROSBase):
         )
 
     def synced_callback(self, rgb_msg, depth_msg, odom_msg):
-        """Callback for synchronized RGB, Depth, and Odom messages."""
+        """Callback for synchronised RGB, Depth, and Odom messages (Odometry mode)."""
         timestamp = rgb_msg.header.stamp.to_sec()
 
         if self.cfg.use_compressed_topic:
@@ -101,6 +127,60 @@ class RunnerROS1(RunnerROSBase):
         self.push_data(rgb_img, depth_img, pose_matrix, timestamp)
         self.last_message_time = time.time()
 
+    def synced_callback_tf(self, rgb_msg, depth_msg):
+        """Callback for synchronised RGB-D input using TF for camera pose. Buffers frames."""
+        if len(self.tf_mode_queue) > 50:
+            self.tf_mode_queue.popleft()
+        self.tf_mode_queue.append((rgb_msg, depth_msg, 0))
+
+    def process_tf_queue(self):
+        """Process buffered frames and resolve TF transforms without blocking."""
+        while self.tf_mode_queue:
+            rgb_msg, depth_msg, retries = self.tf_mode_queue[0]
+            stamp = rgb_msg.header.stamp
+
+            # Look up the transform at the image timestamp
+            try:
+                (trans, quat) = self.tf_listener.lookupTransform(
+                    self.tf_source_frame,
+                    self.tf_target_frame,
+                    stamp,
+                )
+            except Exception as e:
+                # Wait up to sync_threshold seconds (based on ros_rate) for the TF to arrive
+                max_retries = int(self.cfg.ros_rate * self.cfg.sync_threshold)
+                if retries < max_retries:
+                    self.tf_mode_queue[0] = (rgb_msg, depth_msg, retries + 1)
+                    break
+                else:
+                    self.logger.warning(
+                        f"[Main] Dropping frame after persistent TF failures ({max_retries} retries): {e}"
+                    )
+                    self.tf_mode_queue.popleft()
+                    continue
+
+            # Success: remove from queue
+            self.tf_mode_queue.popleft()
+
+            translation = np.array(trans)
+            quaternion = np.array(quat)  # ROS1 tf returns (x, y, z, w)
+            timestamp = stamp.to_sec()
+
+            # Process images (identical to Odometry mode)
+            if self.cfg.use_compressed_topic:
+                rgb_img = self.decompress_image(rgb_msg.data, is_depth=False)
+                depth_img = self.decompress_image(depth_msg.data, is_depth=True)
+            else:
+                rgb_img = self.bridge.imgmsg_to_cv2(rgb_msg, desired_encoding="rgb8")
+                depth_img = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding="passthrough")
+
+            depth_factor = getattr(self.dataset_cfg, 'depth_factor', 1000.0)
+            depth_img = self.process_depth_image(depth_img, depth_factor)
+
+            pose_matrix = self.build_pose_matrix(translation, quaternion)
+            self.push_data(rgb_img, depth_img, pose_matrix, timestamp)
+            self.last_message_time = time.time()
+
     def camera_info_callback(self, msg):
         """Fallback callback to get intrinsics from CameraInfo if needed."""
         if self.intrinsics is None:
@@ -111,6 +191,9 @@ class RunnerROS1(RunnerROSBase):
         """Main loop calling run_once() at configured ROS rate."""
         rate = rospy.Rate(self.cfg.ros_rate)
         while not rospy.is_shutdown() and not self.shutdown_requested:
+            if getattr(self, "use_tf_mode", False):
+                self.process_tf_queue()
+                
             try:
                 self.run_once(lambda: time.time())
             except Exception as e:
