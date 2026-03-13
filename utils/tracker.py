@@ -151,16 +151,22 @@ class Tracker:
         # calculate iou
         iou = self.compute_3d_iou_batch(map_bbox_torch, curr_bbox_torch)
 
+        # calculate centroids for fallback
+        map_centroids = torch.mean(map_bbox_torch, dim=1) # (M, 3)
+        curr_centroids = torch.mean(curr_bbox_torch, dim=1) # (N, 3)
+
         for idx_a in range(len_map):
             for idx_b in range(idx_a + 1, len_curr):
-                if iou[idx_a, idx_b] < 1e-6:
+                centroid_dist = torch.norm(map_centroids[idx_a] - curr_centroids[idx_b]).item()
+
+                if iou[idx_a, idx_b] < 1e-6 and centroid_dist > 0.15:
                     continue
 
                 pcd_map = self.ref_map[idx_a].pcd
                 pcd_curr = self.curr_frame[idx_b].pcd
 
                 overlap_matrix[idx_a, idx_b] = self.find_overlapping_ratio_faiss(
-                    pcd_map, pcd_curr, radius=0.02
+                    pcd_map, pcd_curr, radius=0.10
                 )
 
         return overlap_matrix
@@ -208,18 +214,26 @@ class Tracker:
         # calculate iou
         iou = self.compute_3d_iou_batch(map_bbox_torch, curr_bbox_torch)
 
+        # calculate centroids for fallback
+        map_centroids = torch.mean(map_bbox_torch, dim=1) # (M, 3)
+        curr_centroids = torch.mean(curr_bbox_torch, dim=1) # (N, 3)
+
         counter = 0
 
         # compute the overlap info using pcd
         for idx_a in range(len_map):
             for idx_b in range(len_curr):
 
-                if iou[idx_a, idx_b] < 1e-6:
+                centroid_dist = torch.norm(map_centroids[idx_a] - curr_centroids[idx_b]).item()
+
+                if iou[idx_a, idx_b] < 1e-6 and centroid_dist > 0.15:
                     counter += 1
                     continue
 
+                # Hardcode FAISS radius to 0.10m (10cm) instead of downsample_voxel_size (which is 1cm and too strict)
+                search_radius = 0.10
                 D, I = indices_map[idx_a].search(points_curr[idx_b], 1)
-                overlap = (D < self.cfg.downsample_voxel_size**2).sum()
+                overlap = (D < search_radius**2).sum()
                 # calculate the ratio of points within the threshold distance
                 denom = len(points_curr[idx_b])
                 if denom == 0:
