@@ -138,14 +138,22 @@ class Tracker:
             obj_bbox = np.asarray(obj.bbox.get_box_points())
             obj_bbox = torch.from_numpy(obj_bbox)
             map_bbox_values.append(obj_bbox)
+            
+        if not map_bbox_values:
+            return overlap_matrix
+            
         map_bbox_torch = torch.stack(map_bbox_values, dim=0)
 
         # from curr obs
         curr_bbox_values = []
-        for obj in self.ref_map:
+        for obj in self.curr_frame:
             obj_bbox = np.asarray(obj.bbox.get_box_points())
             obj_bbox = torch.from_numpy(obj_bbox)
             curr_bbox_values.append(obj_bbox)
+            
+        if not curr_bbox_values:
+            return overlap_matrix
+            
         curr_bbox_torch = torch.stack(curr_bbox_values, dim=0)
 
         # calculate iou
@@ -201,6 +209,10 @@ class Tracker:
             obj_bbox = np.asarray(obj.bbox.get_box_points())
             obj_bbox = torch.from_numpy(obj_bbox)
             map_bbox_values.append(obj_bbox)
+            
+        if not map_bbox_values:
+            return torch.from_numpy(overlap_matrix)
+            
         map_bbox_torch = torch.stack(map_bbox_values, dim=0)
 
         # from curr obs
@@ -209,6 +221,10 @@ class Tracker:
             obs_bbox = np.asarray(obs.bbox.get_box_points())
             obs_bbox = torch.from_numpy(obs_bbox)
             curr_bbox_values.append(obs_bbox)
+            
+        if not curr_bbox_values:
+            return torch.from_numpy(overlap_matrix)
+            
         curr_bbox_torch = torch.stack(curr_bbox_values, dim=0)
 
         # calculate iou
@@ -266,6 +282,10 @@ class Tracker:
             map_bbox_values.append(
                 torch.tensor([min_bound[0], min_bound[1], max_bound[0], max_bound[1]])
             )
+        
+        if not map_bbox_values:
+            return torch.zeros((0, len_curr))
+            
         map_bbox_torch = torch.stack(map_bbox_values, dim=0)
 
         # from curr obs
@@ -276,6 +296,10 @@ class Tracker:
             curr_bbox_values.append(
                 torch.tensor([min_bound[0], min_bound[1], max_bound[0], max_bound[1]])
             )
+            
+        if not curr_bbox_values:
+            return torch.zeros((len_map, 0))
+            
         curr_bbox_torch = torch.stack(curr_bbox_values, dim=0)
 
         ratio = self.compute_match_by_intersection_ratio(
@@ -355,8 +379,8 @@ class Tracker:
             obj_feat = torch.from_numpy(obj.clip_ft)
             map_feats_values.append(obj_feat)
 
-        if len(map_feats_values) == 0:
-            return torch.zeros((0, 0))
+        if not map_feats_values:
+            return torch.zeros((0, len(self.curr_frame)))
 
         map_feats_torch = torch.stack(map_feats_values, dim=0)  # (M, D)
 
@@ -365,6 +389,10 @@ class Tracker:
         for obs in self.curr_frame:
             obs_feat = torch.from_numpy(obs.clip_ft)
             curr_feats_values.append(obs_feat)
+            
+        if not curr_feats_values:
+            return torch.zeros((len(self.ref_map), 0))
+            
         curr_feats_torch = torch.stack(curr_feats_values, dim=0)  # (N, D)
 
         map_fts = map_feats_torch.unsqueeze(-1)  # (M, D, 1)
