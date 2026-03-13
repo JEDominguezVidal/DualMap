@@ -76,13 +76,18 @@ class BaseObject:
     def __setstate__(self, state):
         self.uid = state.get("uid")
 
-        # Restore PointCloud from points & colors
+        # Restore PointCloud from points & colours.
+        # self.pcd is always created to guarantee the attribute exists, even for
+        # objects that lost all their points during merge + DBSCAN denoising.
+        # Without this, any code accessing obj.pcd would raise AttributeError.
+
         points = np.array(state.get("pcd_points"))
         colors = np.array(state.get("pcd_colors"))
 
-        if (len(points) != 0) or (len(colors) != 0):
-            self.pcd = o3d.geometry.PointCloud()
+        self.pcd = o3d.geometry.PointCloud()
+        if points.ndim == 2 and points.shape[1] == 3:
             self.pcd.points = o3d.utility.Vector3dVector(points)
+        if colors.ndim == 2 and colors.shape[1] == 3:
             self.pcd.colors = o3d.utility.Vector3dVector(colors)
 
         self.clip_ft = np.array(state.get("clip_ft"))
@@ -245,6 +250,7 @@ class LocalObject(BaseObject):
         # Debug Variable
         ################
         self.downsample_num: int = 0
+        self.unknown_class_id = self.num_classes - 1
 
     @classmethod
     def set_curr_idx(cls, idx: int):
@@ -325,7 +331,12 @@ class LocalObject(BaseObject):
         alpha = np.exp(-k * distance / max_distance)
 
         # Bayesian update
-        self.class_probs = (1 - alpha) * self.class_probs + alpha * smoothed_probs
+        if class_id != self.unknown_class_id:
+            self.class_probs = (1 - alpha) * self.class_probs + alpha * smoothed_probs
+        else:
+            # If unknown, we don't update the Bayesian filter to avoid diluting specific labels
+            # But we still keep history for status/stability if needed (optional)
+            pass
 
         # Normalize
         self.class_probs /= np.sum(self.class_probs)
@@ -684,14 +695,22 @@ class LocalObject(BaseObject):
             self.is_stable = False
             return
 
-        # 2. if the largest label over 1/2 of the observed num, just set as stable
-        class_ids = [obs.class_id for obs in self.observations]
-        obj_class_id_counter = Counter(class_ids)
-        most_common_class_id, most_common_count = obj_class_id_counter.most_common(1)[0]
-
-        if most_common_count > self.observed_num / 3:
-            self.is_stable = True
-            return
+        # 2. if the largest label over 1/3 of the observed num, just set as stable
+        # Use prioritised label for check
+        if self.class_id != self.unknown_class_id:
+            class_ids = [obs.class_id for obs in self.observations]
+            most_common_count = class_ids.count(self.class_id)
+            if most_common_count > self.observed_num / 3:
+                self.is_stable = True
+                return
+        else:
+            # If still unknown, use normal count logic
+            class_ids = [obs.class_id for obs in self.observations]
+            obj_class_id_counter = Counter(class_ids)
+            most_common_class_id, most_common_count = obj_class_id_counter.most_common(1)[0]
+            if most_common_count > self.observed_num / 3:
+                self.is_stable = True
+                return
 
         # 3. if the object is stable by the filter, then set as stable
         if self.is_class_converged():
