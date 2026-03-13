@@ -35,7 +35,8 @@ yolo:
   ## The given classes lists
   ## Indoor Classes List
   # given_classes_path: ./config/class_list/hm3d300_classes_ycb.txt
-  given_classes_path: ./config/class_list/gpt_rosbag_indoor_lab.txt
+  given_classes_path: ./config/class_list/gpt_rosbag_indoor_lab_desk_2.txt
+  # given_classes_path: ./config/class_list/gpt_rosbag_indoor_lab.txt
   # given_classes_path: ./config/class_list/gpt_indoor_office.txt
   # given_classes_path: ./config/class_list/gpt_indoor_apartment.txt
   # given_classes_path: ./config/class_list/gpt_indoor_classroom.txt
@@ -79,6 +80,12 @@ clip:
   # MobileCLIP2 S0/S2 = 512, MobileCLIP2 S3/S4/L-14 = 768, ViT-H-14 = 1024
   clip_length: 512
   # clip_length: 1024
+  # Batch size for CLIP feature extraction to avoid OOM
+  clip_batch_size: 16
+  # Batch size for Point Cloud (PCD) generation to avoid OOM.
+  # Can be adjusted along with clip_batch_size for VRAM optimization.
+  pcd_batch_size: 16
+
 
 # Compute device for inference: "cuda" for GPU, "cpu" for CPU-only
 device: cuda
@@ -113,7 +120,7 @@ save_detection: True
 # Directory for saving and loading cached detections
 detection_path: ${output_path}/${dataset_name}_${scene_id}/detections
 # Show 2D detection results overlaid on camera images in Rerun during runtime
-visualize_detection: False
+visualize_detection: True
 # Show overlapping 3D bounding boxes on Rerun (significantly slower performance)
 show_3d_bbox_overlapped: False
 
@@ -126,7 +133,7 @@ use_fastsam: True
 # Minimum confidence threshold for FastSAM detections (0.0 to 1.0)
 fastsam_confidence: 0.50
 # Display FastSAM debug outputs on Rerun (masks, bounding boxes)
-show_fastsam_debug: False
+show_fastsam_debug: True
 
 
 ## Detection Refinement
@@ -210,7 +217,7 @@ icp_voxel_size: 0.05
 # Maximum correspondence distance (in metres) for ICP. Point pairs further apart
 # than this are ignored during alignment. Increase if odometry drift between frames
 # is large (e.g. 0.4 for wheel odometry). Decrease for high-accuracy setups.
-icp_distance_threshold: 0.4
+icp_distance_threshold: 0.10
 # Minimum number of points (after downsampling) required in BOTH the source and
 # target clouds to attempt ICP. Below this threshold, ICP is skipped to avoid
 # unreliable alignment from too few points.
@@ -219,7 +226,7 @@ icp_min_points: 10
 # Fitness = fraction of source points that found a correspondence within
 # icp_distance_threshold. Higher values = stricter acceptance = fewer false alignments
 # but more cases where ICP is skipped. 0.3 is permissive; 0.8 is strict.
-icp_fitness_threshold: 0.8
+icp_fitness_threshold: 0.3
 
 
 # -------------------------------------------------------
@@ -241,7 +248,7 @@ icp_fitness_threshold: 0.8
 
 # Combined similarity threshold for matching new detections to existing objects.
 # sim = spatial_overlap_ratio + clip_cosine_similarity. Must exceed this to match.
-sim_threshold: 1.0
+sim_threshold: 1.2
 
 # Mobility thresholds
 # Objects are classified as "low mobility" (static, e.g. furniture) or
@@ -394,7 +401,7 @@ merge_local_map: True
 # Minimum point cloud overlap ratio (0.0 to 1.0) required to merge two objects.
 # Lower values merge more aggressively (more duplicates removed but risk merging
 # distinct nearby objects). Higher values are conservative (only near-identical clouds).
-merge_sim_threshold: 0.7
+merge_sim_threshold: 0.8
 
 # Map objects saving directory
 map_save_path: ${output_path}/${dataset_name}_${scene_id}/map

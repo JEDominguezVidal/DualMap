@@ -760,7 +760,11 @@ class Detector:
         """
 
         with timing_context("Create Object Pointcloud", self):
-            N, _, _ = masks.shape
+            N, H, W = masks.shape
+            
+            # Initialize results to the correct length for thread safety
+            self.masked_points = [None] * N
+            self.masked_colors = [None] * N
 
             # Convert input data to tensors
             depth_tensor = (
@@ -769,7 +773,6 @@ class Detector:
                 .float()
                 .squeeze()
             )
-            masks_tensor = torch.from_numpy(masks).to(self.cfg.device).float()
             intrinsic_tensor = (
                 torch.from_numpy(self.curr_data.intrinsics).to(self.cfg.device).float()
             )
@@ -777,61 +780,73 @@ class Detector:
                 torch.from_numpy(self.curr_data.color).to(self.cfg.device).float()
                 / 255.0
             )
+            
+            # Batch masks to avoid massive intermediate (N, H, W, 3) tensors
+            batch_size = self.cfg.clip.pcd_batch_size
+            
+            for b in range(0, N, batch_size):
+                end_idx = min(b + batch_size, N)
+                masks_batch = torch.from_numpy(masks[b:end_idx]).to(self.cfg.device).float()
+                
+                try:
+                    # Generate 3D points and colors for the batch of masks
+                    batch_points, batch_colors = mask_depth_to_points(
+                        depth_tensor,
+                        image_rgb_tensor,
+                        intrinsic_tensor,
+                        masks_batch,
+                        self.cfg.device,
+                    )
+                    
+                    # Process each mask in the batch
+                    for i in range(batch_points.shape[0]):
+                        msg_idx = b + i
+                        mask_points = batch_points[i]
+                        mask_colors = batch_colors[i]
 
-            # Generate 3D points and colors for the masks
-            points_tensor, colors_tensor = mask_depth_to_points(
-                depth_tensor,
-                image_rgb_tensor,
-                intrinsic_tensor,
-                masks_tensor,
-                self.cfg.device,
-            )
+                        # Filter valid points based on Z-axis > 0
+                        valid_points_mask = mask_points[:, :, 2] > 0
 
-            refined_points_list = []
-            refined_colors_list = []
+                        if torch.sum(valid_points_mask) < self.cfg.min_points_threshold:
+                            continue
 
-            # Process each mask
-            for i in range(N):
-                mask_points = points_tensor[i]
-                mask_colors = colors_tensor[i]
+                        valid_points = mask_points[valid_points_mask]
+                        valid_colors = mask_colors[valid_points_mask]
 
-                # Filter valid points based on Z-axis > 0
-                valid_points_mask = mask_points[:, :, 2] > 0
+                        # Random sampling based on sample ratio
+                        sample_ratio = self.cfg.pcd_sample_ratio
+                        num_points = valid_points.shape[0]
 
-                if torch.sum(valid_points_mask) < self.cfg.min_points_threshold:
-                    refined_points_list.append(None)
-                    refined_colors_list.append(None)
-                    continue
+                        if sample_ratio < 1.0:
+                            sample_count = int(num_points * sample_ratio)
+                            sample_indices = torch.randperm(num_points)[:sample_count]
+                            downsampled_points = valid_points[sample_indices]
+                            downsampled_colors = valid_colors[sample_indices]
+                        else:
+                            downsampled_points = valid_points
+                            downsampled_colors = valid_colors
 
-                valid_points = mask_points[valid_points_mask]
-                valid_colors = mask_colors[valid_points_mask]
+                        # Refine points using clustering
+                        refined_points, refined_colors = refine_points_with_clustering(
+                            downsampled_points,
+                            downsampled_colors,
+                            eps=self.cfg.dbscan_eps,
+                            min_points=self.cfg.dbscan_min_points,
+                        )
 
-                # Random sampling based on sample ratio
-                sample_ratio = self.cfg.pcd_sample_ratio
-                num_points = valid_points.shape[0]
+                        self.masked_points[msg_idx] = refined_points
+                        self.masked_colors[msg_idx] = refined_colors
+                        
+                except torch.OutOfMemoryError:
+                    logger.warning(f"[Detector] OOM encountered while processing masks {b} to {end_idx}. Skipping these masks.")
+                    torch.cuda.empty_cache()
+                finally:
+                    # Clean up batch-specific tensors
+                    if 'masks_batch' in locals(): del masks_batch
+                    if 'batch_points' in locals(): del batch_points
+                    if 'batch_colors' in locals(): del batch_colors
+                    torch.cuda.empty_cache()
 
-                if sample_ratio < 1.0:
-                    sample_count = int(num_points * sample_ratio)
-                    sample_indices = torch.randperm(num_points)[:sample_count]
-                    downsampled_points = valid_points[sample_indices]
-                    downsampled_colors = valid_colors[sample_indices]
-                else:
-                    downsampled_points = valid_points
-                    downsampled_colors = valid_colors
-
-                # Refine points using clustering
-                refined_points, refined_colors = refine_points_with_clustering(
-                    downsampled_points,
-                    downsampled_colors,
-                    eps=self.cfg.dbscan_eps,
-                    min_points=self.cfg.dbscan_min_points,
-                )
-
-                refined_points_list.append(refined_points)
-                refined_colors_list.append(refined_colors)
-
-        self.masked_points = refined_points_list
-        self.masked_colors = refined_colors_list
 
     def compute_max_cos_sim(self, image_feats, class_feats):
         """
@@ -1016,7 +1031,7 @@ class Detector:
         # bbox_hl_mapping = []
         for i in range(N):
 
-            if self.masked_points[i] is None:
+            if i >= len(self.masked_points) or self.masked_points[i] is None:
                 continue
 
             # Create pointcloud
@@ -1475,26 +1490,40 @@ class Detector:
             image_crops.append(cropped_image)
 
         # Convert lists to batches
-        preprocessed_images_batch = torch.cat(preprocessed_images, dim=0).to(device)
-        text_tokens_batch = clip_tokenizer(text_tokens).to(device)
+        batch_size = self.cfg.clip.clip_batch_size
+        num_detections = len(preprocessed_images)
+        
+        all_image_features = []
+        all_text_features = []
 
         # Perform batch inference
         with torch.no_grad():
-            # Encode the images using the CLIP model
-            image_features = clip_model.encode_image(preprocessed_images_batch)
+            for i in range(0, num_detections, batch_size):
+                end_idx = min(i + batch_size, num_detections)
+                
+                # Batch processing for images
+                images_chunk = torch.cat(preprocessed_images[i:end_idx], dim=0).to(device)
+                image_features_chunk = clip_model.encode_image(images_chunk)
+                image_features_chunk /= image_features_chunk.norm(dim=-1, keepdim=True)
+                all_image_features.append(image_features_chunk.cpu())
+                
+                # Batch processing for text
+                text_chunk = clip_tokenizer(text_tokens[i:end_idx]).to(device)
+                text_features_chunk = clip_model.encode_text(text_chunk)
+                text_features_chunk /= text_features_chunk.norm(dim=-1, keepdim=True)
+                all_text_features.append(text_features_chunk.cpu())
+                
+                # Explicitly clear VRAM after each batch
+                del images_chunk, image_features_chunk, text_chunk, text_features_chunk
+                torch.cuda.empty_cache()
 
-            # Normalize the image features
-            image_features /= image_features.norm(dim=-1, keepdim=True)
-
-            # Encode the text tokens using the CLIP model
-            text_features = clip_model.encode_text(text_tokens_batch)
-
-            # Normalize the text features
-            text_features /= text_features.norm(dim=-1, keepdim=True)
+        # Concatenate all features
+        image_features = torch.cat(all_image_features, dim=0)
+        text_features = torch.cat(all_text_features, dim=0)
 
         # Convert the image and text features to numpy arrays
-        image_feats = image_features.cpu().numpy()
-        text_feats = text_features.cpu().numpy()
+        image_feats = image_features.numpy()
+        text_feats = text_features.numpy()
 
         if self.cfg.use_avg_feat_for_unknown:
             count = 0

@@ -24,7 +24,8 @@ def mask_depth_to_points(
     )
 
     # z = (N, H, W)
-    z = depth.repeat(N, 1, 1) * masks
+    # Using broadcasting instead of repeat() to save memory
+    z = depth * masks
 
     # (N, H, W)
     valid = (z > 0).float()
@@ -37,7 +38,10 @@ def mask_depth_to_points(
     points = torch.stack((x, y, z), dim=-1) * valid.unsqueeze(-1)
 
     if image is not None:
-        rgb = image.repeat(N, 1, 1, 1) * masks.unsqueeze(-1)
+        # Using broadcasting instead of repeat() to save memory
+        # image: (H, W, 3) -> (1, H, W, 3)
+        # masks: (N, H, W) -> (N, H, W, 1)
+        rgb = image.unsqueeze(0) * masks.unsqueeze(-1)
         colors = rgb * valid.unsqueeze(-1)
     else:
         print("No RGB image provided, assigning random colors to objects")

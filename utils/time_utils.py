@@ -115,6 +115,9 @@ def print_timing_results(label, timing_results):
         return
     rows = []
     for key, times in timing_results.items():
+        if not times:
+            rows.append([key, "N/A", "N/A"])
+            continue
         avg_time = np.mean(times)
         percentile_90 = np.percentile(times, 90)
         rows.append([key, f"{avg_time:.4f}", f"{percentile_90:.4f}"])
@@ -134,6 +137,9 @@ def save_timing_results(timing_results, csv_file):
 
     rows = []
     for key, times in timing_results.items():
+        if not times:
+            rows.append([key, "N/A", "N/A"])
+            continue
         avg_time = np.mean(times)
         percentile_90 = np.percentile(times, 90)
         rows.append([key, f"{avg_time:.4f}", f"{percentile_90:.4f}"])
