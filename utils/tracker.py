@@ -167,14 +167,14 @@ class Tracker:
             for idx_b in range(idx_a + 1, len_curr):
                 centroid_dist = torch.norm(map_centroids[idx_a] - curr_centroids[idx_b]).item()
 
-                if iou[idx_a, idx_b] < 1e-6 and centroid_dist > 0.15:
+                if iou[idx_a, idx_b] < 1e-6 and centroid_dist > self.cfg.merging_centroid_dist:
                     continue
 
                 pcd_map = self.ref_map[idx_a].pcd
                 pcd_curr = self.curr_frame[idx_b].pcd
 
                 overlap_matrix[idx_a, idx_b] = self.find_overlapping_ratio_faiss(
-                    pcd_map, pcd_curr, radius=0.10
+                    pcd_map, pcd_curr, radius=(self.cfg.faiss_radius_factor * self.cfg.downsample_voxel_size)
                 )
 
         return overlap_matrix
@@ -242,12 +242,12 @@ class Tracker:
 
                 centroid_dist = torch.norm(map_centroids[idx_a] - curr_centroids[idx_b]).item()
 
-                if iou[idx_a, idx_b] < 1e-6 and centroid_dist > 0.15:
+                if iou[idx_a, idx_b] < 1e-6 and centroid_dist > self.cfg.tracking_centroid_dist:
                     counter += 1
                     continue
 
-                # Hardcode FAISS radius to 0.10m (10cm) instead of downsample_voxel_size (which is 1cm and too strict)
-                search_radius = 0.10
+                # Use configurable FAISS radius factor
+                search_radius = self.cfg.faiss_radius_factor * self.cfg.downsample_voxel_size
                 D, I = indices_map[idx_a].search(points_curr[idx_b], 1)
                 overlap = (D < search_radius**2).sum()
                 # calculate the ratio of points within the threshold distance
