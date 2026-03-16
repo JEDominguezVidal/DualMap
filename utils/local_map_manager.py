@@ -558,6 +558,19 @@ class LocalMapManager(BaseMapManager):
                 logger.warning("[LocalMap] No save path for local object")
                 continue
 
+        # Add attributes to graph nodes (e.g. object class) before saving
+        for obj in self.local_map:
+            if self.graph.has_node(obj.uid):
+                class_name = self.visualizer.obj_classes.get_classes_arr()[obj.class_id]
+                nx.set_node_attributes(self.graph, {obj.uid: {"class_name": class_name}})
+        
+        # Save the relationships graph in GraphML format
+        graphml_path = os.path.join(save_dir, "object_relations.graphml")
+        # Convert UUIDs to strings to ensure GraphML compatibility
+        stringified_graph = nx.relabel_nodes(self.graph, {n: str(n) for n in self.graph.nodes()})
+        nx.write_graphml(stringified_graph, graphml_path)
+        logger.info(f"[LocalMap] Object relations graph saved to: {graphml_path}")
+
     def merge_local_map(self) -> None:
 
         # Use tracker for matching
