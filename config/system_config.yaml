@@ -261,6 +261,9 @@ merging_centroid_dist: 0.05
 # Multiplier for downsample_voxel_size to determine the FAISS search radius.
 # This radius is used for 3D point cloud overlap calculation.
 faiss_radius_factor: 2.0
+# Maximum distance (in metres) from the camera to accept a new detection.
+# Objects beyond this distance are discarded early to save computation and avoid depth noise.
+max_detection_distance: 1.0
 
 # Mobility thresholds
 # Objects are classified as "low mobility" (static, e.g. furniture) or

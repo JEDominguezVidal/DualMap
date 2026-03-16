@@ -813,6 +813,14 @@ class Detector:
                         valid_points = mask_points[valid_points_mask]
                         valid_colors = mask_colors[valid_points_mask]
 
+                        # Early distance filter (avoid expensive refinement for distant objects)
+                        if valid_points.shape[0] > 0:
+                            centroid = torch.mean(valid_points, dim=0)
+                            # Distance from camera origin (0,0,0) in camera frame
+                            dist = torch.norm(centroid).item()
+                            if dist > self.cfg.max_detection_distance:
+                                continue
+
                         # Random sampling based on sample ratio
                         sample_ratio = self.cfg.pcd_sample_ratio
                         num_points = valid_points.shape[0]
@@ -1055,6 +1063,8 @@ class Detector:
             # class_name = self.obj_classes.get_classes_arr()[self.curr_results['class_id'][i]]
             # Get distance
             distance = self.get_distance(bbox, self.curr_data.pose)
+            if distance > self.cfg.max_detection_distance:
+                continue
 
             # Init observation
             curr_obs = LocalObservation()
