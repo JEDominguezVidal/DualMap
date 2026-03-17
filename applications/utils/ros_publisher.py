@@ -25,6 +25,9 @@ class ROSPublisher:
         self.fs_image_after_publisher = node.create_publisher(
             Image, "/fastsam_image_after", 10
         )
+        self.clip_relabel_image_publisher = node.create_publisher(
+            Image, "/clip_relabel_image", 10
+        )
 
         self.pose_publisher = node.create_publisher(Odometry, "/odom", 10)
 
@@ -54,10 +57,15 @@ class ROSPublisher:
         if self.cfg.use_rviz:
 
             # 2. Publish images
+            # Final merged result after CLIP relabeling.
             self._publish_image(dualmap.detector.annotated_image, "annotated")
             self._publish_image(dualmap.detector.annotated_image_fs, "fastsam")
             self._publish_image(
                 dualmap.detector.annotated_image_fs_after, "fastsam_after"
+            )
+            # Debug view with only FastSAM detections promoted by CLIP.
+            self._publish_image(
+                dualmap.detector.annotated_image_clip_relabel, "clip_relabel"
             )
 
             # 3. Publish pose
@@ -114,6 +122,7 @@ class ROSPublisher:
             "annotated": self.image_publisher,
             "fastsam": self.fs_image_publisher,
             "fastsam_after": self.fs_image_after_publisher,
+            "clip_relabel": self.clip_relabel_image_publisher,
         }.get(image_type, None)
 
         if publisher:

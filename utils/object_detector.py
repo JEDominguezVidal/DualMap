@@ -1,4 +1,5 @@
 import gzip
+from collections import Counter
 import logging
 import os
 import pdb
@@ -135,6 +136,7 @@ class Detector:
             )
         self.annotated_image_fs = None
         self.annotated_image_fs_after = None
+        self.annotated_image_clip_relabel = None
         self.relabel_candidate_ids = np.empty(0, dtype=np.int64)
 
         # Layout Pointcloud
@@ -276,6 +278,7 @@ class Detector:
     def update_state(self) -> None:
         self.curr_results = {}
         self.curr_observations = []
+        # Keep the latest debug images alive until ROS publishes them.
         # self.prev_data = self.curr_data.copy()
         # self.curr_data.clear()
 
@@ -837,6 +840,49 @@ class Detector:
             top2_class_ids,
         )
 
+    def log_relabel_summary(
+        self,
+        label_source: np.ndarray,
+        num_detections: int,
+    ) -> None:
+        label_source_counter = Counter(label_source.tolist())
+        logger.info(
+            "[Detector][Relabel] detections=%d, fastsam_unknown=%d, fastsam_clip=%d, sources=%s",
+            num_detections,
+            int(label_source_counter.get("fastsam_unknown", 0)),
+            int(label_source_counter.get("fastsam_clip", 0)),
+            dict(sorted(label_source_counter.items())),
+        )
+
+    def build_clip_relabel_debug_image(
+        self,
+        color: np.ndarray,
+        detections: sv.Detections,
+        label_source: np.ndarray,
+        semantic_confidence: np.ndarray,
+    ) -> np.ndarray:
+        clip_indices = np.flatnonzero(label_source == "fastsam_clip")
+        if len(clip_indices) == 0:
+            return color.copy()
+
+        clip_relabel_detections = sv.Detections(
+            xyxy=detections.xyxy[clip_indices],
+            mask=(
+                detections.mask[clip_indices]
+                if detections.mask is not None
+                else None
+            ),
+            confidence=semantic_confidence[clip_indices],
+            class_id=detections.class_id[clip_indices],
+        )
+
+        annotated_image, _ = visualize_result_rgb(
+            color,
+            clip_relabel_detections,
+            self.obj_classes.get_classes_arr(),
+        )
+        return annotated_image
+
     def process_detections(self):
 
         color = self.curr_data.color.astype(np.uint8)
@@ -912,6 +958,10 @@ class Detector:
             text_feats=text_feats,
         )
         filtered_detections.class_id = class_id
+        self.log_relabel_summary(
+            label_source=label_source,
+            num_detections=len(class_id),
+        )
 
         results = {
             # SAM Info
@@ -934,10 +984,20 @@ class Detector:
 
         if self.cfg.visualize_detection:
             with timing_context("Visualize Detection", self):
+                # Final post-CLIP image with all detections.
                 annotated_image, _ = visualize_result_rgb(
                     color, filtered_detections, self.obj_classes.get_classes_arr()
                 )
                 self.annotated_image = annotated_image
+                # Debug image with only FastSAM detections promoted by CLIP.
+                self.annotated_image_clip_relabel = (
+                    self.build_clip_relabel_debug_image(
+                        color=color,
+                        detections=filtered_detections,
+                        label_source=label_source,
+                        semantic_confidence=semantic_confidence,
+                    )
+                )
 
         self.curr_results = results
 
