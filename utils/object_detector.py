@@ -125,9 +125,17 @@ class Detector:
         self.annotated_image = None
 
         # Variables for FastSAM
-        self.unknown_class_id = len(self.obj_classes.get_classes_arr()) - 1
+        self.unknown_class_id = self.obj_classes.get_unknown_class_id()
+        if self.unknown_class_id is None and (
+            cfg.use_fastsam or cfg.clip_unknown_relabel.enabled
+        ):
+            raise ValueError(
+                "The active class list must contain an 'unknown' label when FastSAM "
+                "or CLIP unknown relabeling is enabled."
+            )
         self.annotated_image_fs = None
         self.annotated_image_fs_after = None
+        self.relabel_candidate_ids = np.empty(0, dtype=np.int64)
 
         # Layout Pointcloud
         self.layout_pointcloud = o3d.geometry.PointCloud()
@@ -237,6 +245,13 @@ class Detector:
                 clip_length=cfg.clip.clip_length,
             )
             self.class_feats = class_feats
+            self.relabel_candidate_ids = self.build_relabel_candidate_ids()
+
+            if cfg.clip_unknown_relabel.enabled and len(self.relabel_candidate_ids) == 0:
+                raise ValueError(
+                    "CLIP unknown relabeling is enabled, but no candidate classes "
+                    "remain after applying the configured exclusions."
+                )
 
             # Used for unknown class
             if cfg.use_avg_feat_for_unknown:
@@ -668,6 +683,160 @@ class Detector:
         )
         return merged_detctions
 
+    def build_relabel_candidate_ids(self):
+        classes = self.obj_classes.get_classes_arr()
+        seen_names = set()
+        duplicate_names = set()
+        candidate_ids = []
+
+        for idx, class_name in enumerate(classes):
+            if class_name in seen_names:
+                duplicate_names.add(class_name)
+                continue
+
+            seen_names.add(class_name)
+
+            if (
+                self.cfg.clip_unknown_relabel.exclude_unknown_label
+                and class_name == "unknown"
+            ):
+                continue
+
+            if (
+                self.cfg.clip_unknown_relabel.exclude_bg_classes
+                and class_name in self.obj_classes.get_bg_classes_arr()
+            ):
+                continue
+
+            candidate_ids.append(idx)
+
+        if duplicate_names:
+            duplicate_names = sorted(duplicate_names)
+            logger.warning(
+                "[Detector][Init] Duplicate class names detected in %s. "
+                "CLIP relabeling will deduplicate them by keeping the first "
+                "occurrence: %s",
+                self.obj_classes.classes_file_path,
+                duplicate_names,
+            )
+
+        return np.asarray(candidate_ids, dtype=np.int64)
+
+    @staticmethod
+    def normalize_features(features: np.ndarray) -> np.ndarray:
+        norms = np.linalg.norm(features, axis=1, keepdims=True)
+        norms = np.clip(norms, a_min=1e-12, a_max=None)
+        return features / norms
+
+    def relabel_unknown_with_clip(
+        self,
+        class_ids: np.ndarray,
+        confidences: np.ndarray,
+        image_feats: np.ndarray,
+        text_feats: np.ndarray,
+    ):
+        relabel_cfg = self.cfg.clip_unknown_relabel
+        num_detections = len(class_ids)
+
+        semantic_confidence = confidences.astype(np.float32, copy=True)
+        label_source = np.full(num_detections, "yolo", dtype="<U32")
+        top1_scores = np.full(num_detections, np.nan, dtype=np.float32)
+        top2_scores = np.full(num_detections, np.nan, dtype=np.float32)
+        top1_class_ids = np.full(num_detections, -1, dtype=np.int64)
+        top2_class_ids = np.full(num_detections, -1, dtype=np.int64)
+
+        if self.unknown_class_id is not None:
+            label_source[class_ids == self.unknown_class_id] = "fastsam_unknown"
+
+        if (
+            not relabel_cfg.enabled
+            or self.unknown_class_id is None
+            or len(self.relabel_candidate_ids) == 0
+        ):
+            return (
+                class_ids,
+                text_feats,
+                semantic_confidence,
+                label_source,
+                top1_scores,
+                top2_scores,
+                top1_class_ids,
+                top2_class_ids,
+            )
+
+        unknown_indices = np.where(class_ids == self.unknown_class_id)[0]
+        if len(unknown_indices) == 0:
+            return (
+                class_ids,
+                text_feats,
+                semantic_confidence,
+                label_source,
+                top1_scores,
+                top2_scores,
+                top1_class_ids,
+                top2_class_ids,
+            )
+
+        if relabel_cfg.use_image_features_only:
+            relabel_feats = image_feats[unknown_indices]
+        else:
+            weighted_feats = (
+                self.cfg.image_weight * image_feats[unknown_indices]
+                + (1 - self.cfg.image_weight) * text_feats[unknown_indices]
+            )
+            relabel_feats = self.normalize_features(weighted_feats)
+
+        candidate_feats = self.class_feats[self.relabel_candidate_ids]
+        relabel_feats = self.normalize_features(relabel_feats)
+        candidate_feats = self.normalize_features(candidate_feats)
+        similarity = np.matmul(relabel_feats, candidate_feats.T)
+
+        for row_idx, det_idx in enumerate(unknown_indices):
+            scores = similarity[row_idx]
+            rank = np.argsort(scores)[::-1]
+            top1_rank = rank[0]
+            top1_class_id = int(self.relabel_candidate_ids[top1_rank])
+            top1_score = float(scores[top1_rank])
+
+            top2_score = -1.0
+            top2_class_id = -1
+            if len(rank) > 1:
+                top2_rank = rank[1]
+                top2_class_id = int(self.relabel_candidate_ids[top2_rank])
+                top2_score = float(scores[top2_rank])
+
+            top1_scores[det_idx] = top1_score
+            top2_scores[det_idx] = top2_score
+            top1_class_ids[det_idx] = top1_class_id
+            top2_class_ids[det_idx] = top2_class_id
+
+            if (
+                top1_score >= relabel_cfg.min_similarity
+                and top1_score - top2_score >= relabel_cfg.min_margin
+            ):
+                class_ids[det_idx] = top1_class_id
+                text_feats[det_idx] = self.class_feats[top1_class_id]
+                semantic_confidence[det_idx] = top1_score
+                label_source[det_idx] = "fastsam_clip"
+
+        relabeled_count = np.sum(label_source == "fastsam_clip")
+        if relabeled_count > 0:
+            logger.info(
+                "[Detector] Relabeled %d unknown detections with CLIP.",
+                int(relabeled_count),
+            )
+
+        return (
+            class_ids,
+            text_feats,
+            semantic_confidence,
+            label_source,
+            top1_scores,
+            top2_scores,
+            top1_class_ids,
+            top2_class_ids,
+        )
+
     def process_detections(self):
 
         color = self.curr_data.color.astype(np.uint8)
@@ -726,16 +895,42 @@ class Detector:
 
             cluster_thread.join()
 
+        class_id = filtered_detections.class_id.copy()
+        (
+            class_id,
+            text_feats,
+            semantic_confidence,
+            label_source,
+            relabel_top1_scores,
+            relabel_top2_scores,
+            relabel_top1_class_ids,
+            relabel_top2_class_ids,
+        ) = self.relabel_unknown_with_clip(
+            class_ids=class_id,
+            confidences=filtered_detections.confidence,
+            image_feats=image_feats,
+            text_feats=text_feats,
+        )
+        filtered_detections.class_id = class_id
+
         results = {
             # SAM Info
             "xyxy": filtered_detections.xyxy,
             "confidence": filtered_detections.confidence,
-            "class_id": filtered_detections.class_id,
+            "class_id": class_id,
             "masks": filtered_detections.mask,
             # CLIP info
             "image_feats": image_feats,
             "text_feats": text_feats,
+            "semantic_confidence": semantic_confidence,
+            "label_source": label_source,
         }
+
+        if self.cfg.clip_unknown_relabel.save_debug_scores:
+            results["relabel_top1_scores"] = relabel_top1_scores
+            results["relabel_top2_scores"] = relabel_top2_scores
+            results["relabel_top1_class_ids"] = relabel_top1_class_ids
+            results["relabel_top2_class_ids"] = relabel_top2_class_ids
 
         if self.cfg.visualize_detection:
             with timing_context("Visualize Detection", self):
@@ -1022,6 +1217,45 @@ class Detector:
                 raise ValueError(f"{file_path} is not a .pkl.gz or .npz file!")
 
         self.curr_results = loaded_detections
+        self.ensure_detection_metadata()
+
+    def ensure_detection_metadata(self) -> None:
+        if not self.curr_results:
+            return
+
+        class_ids = self.curr_results.get("class_id")
+        confidence = self.curr_results.get("confidence")
+
+        if class_ids is None or confidence is None:
+            return
+
+        det_count = len(class_ids)
+
+        if "semantic_confidence" not in self.curr_results:
+            logger.warning(
+                "[Detector] Loaded cached detections without semantic_confidence. "
+                "Treating them as pre-relabel detections."
+            )
+            self.curr_results["semantic_confidence"] = confidence.astype(
+                np.float32, copy=True
+            )
+
+        if "label_source" not in self.curr_results:
+            logger.warning(
+                "[Detector] Loaded cached detections without label_source. "
+                "Treating them as pre-relabel detections."
+            )
+            label_source = np.full(det_count, "yolo", dtype="<U32")
+            if self.unknown_class_id is not None:
+                label_source[class_ids == self.unknown_class_id] = "fastsam_unknown"
+            self.curr_results["label_source"] = label_source
+
+    def get_default_label_source(self) -> np.ndarray:
+        class_ids = self.curr_results.get("class_id", np.empty(0, dtype=np.int64))
+        label_source = np.full(len(class_ids), "yolo", dtype="<U32")
+        if self.unknown_class_id is not None:
+            label_source[class_ids == self.unknown_class_id] = "fastsam_unknown"
+        return label_source
 
     def calculate_observations(
         self,
@@ -1075,7 +1309,14 @@ class Detector:
             curr_obs.mask = self.curr_results["masks"][i]
 
             curr_obs.xyxy = self.curr_results["xyxy"][i]
-            curr_obs.conf = self.curr_results["confidence"][i]
+            curr_obs.semantic_confidence = self.curr_results.get(
+                "semantic_confidence", self.curr_results["confidence"]
+            )[i]
+            curr_obs.conf = curr_obs.semantic_confidence
+            curr_obs.label_source = self.curr_results.get(
+                "label_source",
+                self.get_default_label_source(),
+            )[i]
 
             if self.cfg.use_weighted_feature:
                 curr_obs.clip_ft = self.get_weighted_feature(idx=i)
@@ -1535,7 +1776,7 @@ class Detector:
         image_feats = image_features.numpy()
         text_feats = text_features.numpy()
 
-        if self.cfg.use_avg_feat_for_unknown:
+        if self.cfg.use_avg_feat_for_unknown and self.unknown_class_id is not None:
             count = 0
             for idx, class_id in enumerate(detections.class_id):
                 if class_id == self.unknown_class_id:
@@ -1554,8 +1795,9 @@ class Detector:
                 f"[Detector] Updated {count} unknown class text features to the mean value."
             )
         else:
+            count = 0
             for idx, class_id in enumerate(detections.class_id):
-                if class_id == self.unknown_class_id:
+                if self.unknown_class_id is not None and class_id == self.unknown_class_id:
                     count += 1
                     # Modify the text_feats for the unknown class
                     # text_feats[idx] = self.class_feats_mean  # You can modify how you update the text_feats here

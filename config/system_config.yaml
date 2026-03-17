@@ -165,6 +165,19 @@ image_weight: 0.7
 # Use average feat for unknown classes detected by FastSAM
 use_avg_feat_for_unknown: True
 
+# Optional CLIP-based relabeling for FastSAM detections that remain "unknown".
+# The relabeling compares the image embedding of each unknown crop against the
+# text embeddings of the active class list and promotes the best match only when
+# the similarity is both high enough and sufficiently separated from the runner-up.
+clip_unknown_relabel:
+  enabled: true
+  min_similarity: 0.05
+  min_margin: 0.01
+  exclude_bg_classes: true
+  exclude_unknown_label: true
+  use_image_features_only: true
+  save_debug_scores: true
+
 
 # -------------------------------------------------------
 # POINT CLOUD (PCD) SETTINGS

@@ -1,5 +1,6 @@
 import copy
 import json
+import logging
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
@@ -7,6 +8,8 @@ from pathlib import Path
 
 import numpy as np
 import open3d as o3d
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -59,7 +62,9 @@ class LocalObservation(Observation):
     mask: np.ndarray = field(default_factory=lambda: np.empty((0, 0), dtype=np.uint8))
     xyxy: np.ndarray = field(default_factory=lambda: np.empty((0, 4), dtype=np.float32))
     conf: float = 0.0
+    semantic_confidence: float = 0.0
     distance: float = 0.0
+    label_source: str = "unknown"
 
     is_low_mobility: bool = False
 
@@ -106,9 +111,11 @@ class ObjectClasses:
         self.classes_file_path = Path(classes_file_path)
         self.bg_classes = bg_classes
         self.skip_bg = skip_bg
+        self.unknown_class_name = "unknown"
         self.classes, self.class_to_color = self._load_or_create_colors(
             selection_ratio=1.0
         )
+        self.unknown_class_id = self._find_unknown_class_id()
 
     def _load_or_create_colors(self, selection_ratio=1.0):
         """
@@ -174,6 +181,39 @@ class ObjectClasses:
         Return the list of classes names
         """
         return self.classes
+
+    def _find_unknown_class_id(self):
+        unknown_indices = [
+            idx for idx, class_name in enumerate(self.classes)
+            if class_name == self.unknown_class_name
+        ]
+
+        if not unknown_indices:
+            logger.warning(
+                "[ObjectClasses] No '%s' class found in %s.",
+                self.unknown_class_name,
+                self.classes_file_path,
+            )
+            return None
+
+        if len(unknown_indices) > 1:
+            logger.warning(
+                "[ObjectClasses] Multiple '%s' entries found in %s. Using the first one at index %d.",
+                self.unknown_class_name,
+                self.classes_file_path,
+                unknown_indices[0],
+            )
+
+        return unknown_indices[0]
+
+    def get_unknown_class_id(self):
+        return self.unknown_class_id
+
+    def get_class_ids_by_name(self, class_name):
+        return [
+            idx for idx, existing_name in enumerate(self.classes)
+            if existing_name == class_name
+        ]
 
     def get_bg_classes_arr(self):
         """
