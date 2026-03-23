@@ -27,9 +27,17 @@ class RunnerROSBase:
         self.kf_idx = 0
         self.intrinsics = None
         self.extrinsics = None
+        self.pose_represents = None
+        self.tf_world_frame = None
+        self.tf_camera_frame = None
         self.synced_data_queue = deque(maxlen=1)
         self.shutdown_requested = False
         self.last_message_time = None
+        self.max_rgb_depth_dt = float(getattr(cfg, "max_rgb_depth_dt", 0.03))
+        self.max_pose_rgb_dt = float(getattr(cfg, "max_pose_rgb_dt", 0.03))
+        self.tf_lookup_timeout = float(getattr(cfg, "tf_lookup_timeout", 0.10))
+        self.drop_unsynced_frames = bool(getattr(cfg, "drop_unsynced_frames", True))
+        self.dropped_frame_count = 0
 
     def load_intrinsics(self, dataset_cfg):
         """Load camera intrinsics from config file."""
@@ -49,15 +57,208 @@ class RunnerROSBase:
     def load_extrinsics(self, dataset_cfg):
         """Load camera extrinsics from config file."""
         extrinsic_cfg = dataset_cfg.get("extrinsics", None)
-        if extrinsic_cfg:
+        if extrinsic_cfg is not None:
             matrix = np.array(extrinsic_cfg)
             if matrix.shape == (4, 4):
                 self.logger.warning("[Main] Loaded extrinsics from config.")
                 return matrix
+            raise ValueError(
+                "[Main] Invalid extrinsics matrix in config. Expected a 4x4 matrix."
+            )
+        self.logger.warning("[Main] No extrinsics provided in config.")
+        return None
+
+    def resolve_pose_represents(self, dataset_cfg, use_tf_mode):
+        """Resolve whether the incoming pose refers to the camera or the base frame."""
+        pose_represents = dataset_cfg.get("pose_represents", None)
+        if pose_represents is None:
+            pose_represents = "camera_frame" if use_tf_mode else "base_frame"
+            self.logger.warning(
+                "[Main] Missing 'pose_represents' in ROS config. Assuming '%s'.",
+                pose_represents,
+            )
+
+        valid_modes = {"camera_frame", "base_frame"}
+        if pose_represents not in valid_modes:
+            raise ValueError(
+                "[Main] Invalid pose_represents '%s'. Expected one of %s."
+                % (pose_represents, sorted(valid_modes))
+            )
+
+        if use_tf_mode and pose_represents != "camera_frame":
+            raise ValueError(
+                "[Main] TF mode requires pose_represents='camera_frame' because "
+                "TF lookup already returns the camera pose."
+            )
+
+        return pose_represents
+
+    def configure_pose_contract(self, dataset_cfg, use_tf_mode):
+        """Resolve pose semantics and the extrinsics policy used by the runners."""
+        self.pose_represents = self.resolve_pose_represents(dataset_cfg, use_tf_mode)
+        loaded_extrinsics = self.load_extrinsics(dataset_cfg)
+        identity = np.eye(4)
+
+        if self.pose_represents == "camera_frame":
+            if loaded_extrinsics is not None and not np.allclose(
+                loaded_extrinsics, identity
+            ):
+                self.logger.warning(
+                    "[Main] pose_represents='camera_frame'. Ignoring non-identity "
+                    "extrinsics because the incoming pose already describes the camera."
+                )
+            self.extrinsics = identity
+        else:
+            if loaded_extrinsics is None:
+                raise ValueError(
+                    "[Main] pose_represents='base_frame' requires a valid 4x4 "
+                    "extrinsics matrix to convert base poses into camera poses."
+                )
+            self.extrinsics = loaded_extrinsics
+            self.logger.warning(
+                "[Main] pose_represents='base_frame'. Extrinsics will be applied "
+                "to convert base poses into camera poses."
+            )
+
         self.logger.warning(
-            "[Main] No valid extrinsics provided. Using identity matrix."
+            "[Main] Pose contract resolved: pose_represents='%s'.",
+            self.pose_represents,
         )
-        return np.eye(4)
+        return self.pose_represents
+
+    def resolve_tf_frames(self, dataset_cfg):
+        """Resolve canonical TF frame names, accepting legacy aliases with warnings."""
+        tf_world_frame = dataset_cfg.get("tf_world_frame", None)
+        tf_camera_frame = dataset_cfg.get("tf_camera_frame", None)
+        legacy_source = dataset_cfg.get("tf_source_frame", None)
+        legacy_target = dataset_cfg.get("tf_target_frame", None)
+
+        if tf_world_frame and tf_camera_frame:
+            if legacy_source or legacy_target:
+                self.logger.warning(
+                    "[Main] Both canonical TF frame keys and deprecated "
+                    "tf_source_frame/tf_target_frame were provided. "
+                    "Using tf_world_frame/tf_camera_frame."
+                )
+            return tf_world_frame, tf_camera_frame
+
+        if legacy_source or legacy_target:
+            if not (legacy_source and legacy_target):
+                raise ValueError(
+                    "[Main] Deprecated TF config requires both tf_source_frame and "
+                    "tf_target_frame."
+                )
+            self.logger.warning(
+                "[Main] tf_source_frame/tf_target_frame are deprecated. "
+                "Please migrate to tf_world_frame/tf_camera_frame."
+            )
+            return legacy_source, legacy_target
+
+        raise ValueError(
+            "[Main] TF mode requires tf_world_frame/tf_camera_frame "
+            "(or deprecated tf_source_frame/tf_target_frame)."
+        )
+
+    def resolve_camera_pose_matrix(self, pose):
+        """Convert the incoming pose into the camera pose expected by the mapper."""
+        if self.pose_represents == "camera_frame":
+            return pose
+        if self.pose_represents == "base_frame":
+            if self.extrinsics is None:
+                raise RuntimeError(
+                    "[Main] Cannot resolve camera pose: extrinsics are missing."
+                )
+            return pose @ self.extrinsics
+        raise RuntimeError("[Main] Pose contract has not been configured yet.")
+
+    def format_pose_frames(self, parent_frame, child_frame, default="unknown"):
+        if parent_frame or child_frame:
+            return f"{parent_frame or '?'}->{child_frame or '?'}"
+        return default
+
+    def log_frame_sync(
+        self,
+        *,
+        status,
+        rgb_depth_dt,
+        pose_rgb_dt,
+        pose_mode,
+        pose_frames,
+        reason,
+    ):
+        """Emit a structured per-frame synchronisation log entry."""
+        log_method = self.logger.info
+        if status != "accepted":
+            log_method = self.logger.warning
+
+        pose_rgb_text = (
+            f"{pose_rgb_dt:.4f}" if pose_rgb_dt is not None else "nan"
+        )
+        log_method(
+            "[Main][FrameSync] status=%s rgb_depth_dt=%.4f pose_rgb_dt=%s "
+            "pose_mode=%s pose_frames=%s reason=%s dropped_count=%d",
+            status,
+            rgb_depth_dt,
+            pose_rgb_text,
+            pose_mode,
+            pose_frames,
+            reason,
+            self.dropped_frame_count,
+        )
+
+    def evaluate_frame_sync(
+        self,
+        *,
+        rgb_timestamp,
+        depth_timestamp,
+        pose_timestamp,
+        pose_mode,
+        pose_frames,
+        validate_pose=True,
+        log_decision=True,
+    ):
+        """Validate temporal alignment between RGB, depth, and pose timestamps."""
+        rgb_depth_dt = abs(rgb_timestamp - depth_timestamp)
+        pose_rgb_dt = None
+        reason = "within_thresholds"
+
+        if rgb_depth_dt > self.max_rgb_depth_dt:
+            reason = (
+                f"rgb_depth_dt_exceeded({rgb_depth_dt:.4f}>{self.max_rgb_depth_dt:.4f})"
+            )
+        elif validate_pose and pose_timestamp is not None:
+            pose_rgb_dt = abs(pose_timestamp - rgb_timestamp)
+            if pose_rgb_dt > self.max_pose_rgb_dt:
+                reason = (
+                    f"pose_rgb_dt_exceeded({pose_rgb_dt:.4f}>{self.max_pose_rgb_dt:.4f})"
+                )
+        elif pose_timestamp is not None:
+            pose_rgb_dt = abs(pose_timestamp - rgb_timestamp)
+
+        within_thresholds = reason == "within_thresholds"
+        should_process = within_thresholds or not self.drop_unsynced_frames
+
+        if not within_thresholds and self.drop_unsynced_frames:
+            self.dropped_frame_count += 1
+
+        if log_decision:
+            status = "accepted"
+            if not within_thresholds:
+                status = "accepted_with_warning" if should_process else "dropped"
+            self.log_frame_sync(
+                status=status,
+                rgb_depth_dt=rgb_depth_dt,
+                pose_rgb_dt=pose_rgb_dt,
+                pose_mode=pose_mode,
+                pose_frames=pose_frames,
+                reason=reason,
+            )
+
+        return should_process, {
+            "rgb_depth_dt": rgb_depth_dt,
+            "pose_rgb_dt": pose_rgb_dt,
+            "reason": reason,
+        }
 
     def create_world_transform(self):
         """Create world coordinate transformation from roll/pitch/yaw."""
@@ -142,9 +343,24 @@ class RunnerROSBase:
         transformation_matrix[:3, 3] = translation
         return transformation_matrix
 
-    def push_data(self, rgb_img, depth_img, pose, timestamp):
+    def push_data(
+        self,
+        rgb_img,
+        depth_img,
+        pose,
+        timestamp,
+        *,
+        rgb_timestamp=None,
+        depth_timestamp=None,
+        pose_timestamp=None,
+        pose_mode=None,
+    ):
         """Push synchronized input data into queue for processing."""
-        transformed_pose = self.create_world_transform() @ (pose @ self.extrinsics)
+        camera_pose = self.resolve_camera_pose_matrix(pose)
+        transformed_pose = self.create_world_transform() @ camera_pose
+        rgb_timestamp = timestamp if rgb_timestamp is None else rgb_timestamp
+        depth_timestamp = rgb_timestamp if depth_timestamp is None else depth_timestamp
+        pose_timestamp = rgb_timestamp if pose_timestamp is None else pose_timestamp
 
         data_input = DataInput(
             idx=self.kf_idx,
@@ -154,6 +370,12 @@ class RunnerROSBase:
             color_name=str(timestamp),
             intrinsics=self.intrinsics,
             pose=transformed_pose,
+            rgb_timestamp=rgb_timestamp,
+            depth_timestamp=depth_timestamp,
+            pose_timestamp=pose_timestamp,
+            rgb_depth_dt=abs(rgb_timestamp - depth_timestamp),
+            pose_rgb_dt=abs(pose_timestamp - rgb_timestamp),
+            pose_mode=pose_mode or self.pose_represents or "unknown",
         )
         self.synced_data_queue.append(data_input)
         return data_input

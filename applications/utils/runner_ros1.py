@@ -38,7 +38,6 @@ class RunnerROS1(RunnerROSBase):
         self.bridge = CvBridge()
         self.dataset_cfg = OmegaConf.load(cfg.ros_stream_config_path)
         self.intrinsics = self.load_intrinsics(self.dataset_cfg)
-        self.extrinsics = self.load_extrinsics(self.dataset_cfg)
 
         # Image and Odometry Subscribers
         if self.cfg.use_compressed_topic:
@@ -53,17 +52,23 @@ class RunnerROS1(RunnerROSBase):
             self.depth_sub = Subscriber(self.dataset_cfg.ros_topics.depth, Image)
 
         # Detect pose mode: Odometry topic vs TF lookup
-        self.use_tf_mode = not hasattr(self.dataset_cfg.ros_topics, 'odom')
+        self.use_tf_mode = not hasattr(self.dataset_cfg.ros_topics, "odom")
+        self.configure_pose_contract(self.dataset_cfg, self.use_tf_mode)
 
         if self.use_tf_mode:
             # TF mode: obtain camera pose from tf transforms
-            self.logger.warning("[Main] No 'odom' topic defined. Using TF mode for camera pose.")
+            self.logger.warning(
+                "[Main] No 'odom' topic defined. Using TF mode for camera pose."
+            )
             self.tf_listener = tf.TransformListener()
-            self.tf_source_frame = self.dataset_cfg.tf_source_frame
-            self.tf_target_frame = self.dataset_cfg.tf_target_frame
+            self.tf_world_frame, self.tf_camera_frame = self.resolve_tf_frames(
+                self.dataset_cfg
+            )
             self.tf_mode_queue = deque()
             self.logger.warning(
-                f"[Main] TF lookup: '{self.tf_source_frame}' -> '{self.tf_target_frame}'"
+                "[Main] TF lookup: '%s' -> '%s'",
+                self.tf_world_frame,
+                self.tf_camera_frame,
             )
 
             # Sync only RGB + Depth (no Odometry)
@@ -95,7 +100,25 @@ class RunnerROS1(RunnerROSBase):
 
     def synced_callback(self, rgb_msg, depth_msg, odom_msg):
         """Callback for synchronised RGB, Depth, and Odom messages (Odometry mode)."""
-        timestamp = rgb_msg.header.stamp.to_sec()
+        rgb_timestamp = rgb_msg.header.stamp.to_sec()
+        depth_timestamp = depth_msg.header.stamp.to_sec()
+        odom_timestamp = odom_msg.header.stamp.to_sec()
+        timestamp = rgb_timestamp
+        pose_frames = self.format_pose_frames(
+            odom_msg.header.frame_id,
+            odom_msg.child_frame_id,
+            default="odom(unknown_frames)",
+        )
+
+        should_process, _ = self.evaluate_frame_sync(
+            rgb_timestamp=rgb_timestamp,
+            depth_timestamp=depth_timestamp,
+            pose_timestamp=odom_timestamp,
+            pose_mode=self.pose_represents,
+            pose_frames=pose_frames,
+        )
+        if not should_process:
+            return
 
         if self.cfg.use_compressed_topic:
             rgb_img = self.decompress_image(rgb_msg.data, is_depth=False)
@@ -124,47 +147,91 @@ class RunnerROS1(RunnerROSBase):
         )
 
         pose_matrix = self.build_pose_matrix(translation, quaternion)
-        self.push_data(rgb_img, depth_img, pose_matrix, timestamp)
+        self.push_data(
+            rgb_img,
+            depth_img,
+            pose_matrix,
+            timestamp,
+            rgb_timestamp=rgb_timestamp,
+            depth_timestamp=depth_timestamp,
+            pose_timestamp=odom_timestamp,
+            pose_mode=self.pose_represents,
+        )
         self.last_message_time = time.time()
 
     def synced_callback_tf(self, rgb_msg, depth_msg):
         """Callback for synchronised RGB-D input using TF for camera pose. Buffers frames."""
         if len(self.tf_mode_queue) > 50:
             self.tf_mode_queue.popleft()
-        self.tf_mode_queue.append((rgb_msg, depth_msg, 0))
+        self.tf_mode_queue.append((rgb_msg, depth_msg, time.monotonic()))
 
     def process_tf_queue(self):
         """Process buffered frames and resolve TF transforms without blocking."""
         while self.tf_mode_queue:
-            rgb_msg, depth_msg, retries = self.tf_mode_queue[0]
+            rgb_msg, depth_msg, enqueue_time = self.tf_mode_queue[0]
             stamp = rgb_msg.header.stamp
+            rgb_timestamp = rgb_msg.header.stamp.to_sec()
+            depth_timestamp = depth_msg.header.stamp.to_sec()
+            pose_frames = self.format_pose_frames(
+                self.tf_world_frame,
+                self.tf_camera_frame,
+            )
+
+            if (
+                abs(rgb_timestamp - depth_timestamp) > self.max_rgb_depth_dt
+                and self.drop_unsynced_frames
+            ):
+                self.evaluate_frame_sync(
+                    rgb_timestamp=rgb_timestamp,
+                    depth_timestamp=depth_timestamp,
+                    pose_timestamp=rgb_timestamp,
+                    pose_mode=self.pose_represents,
+                    pose_frames=pose_frames,
+                    validate_pose=False,
+                )
+                self.tf_mode_queue.popleft()
+                continue
 
             # Look up the transform at the image timestamp
             try:
                 (trans, quat) = self.tf_listener.lookupTransform(
-                    self.tf_source_frame,
-                    self.tf_target_frame,
+                    self.tf_world_frame,
+                    self.tf_camera_frame,
                     stamp,
                 )
             except Exception as e:
-                # Wait up to sync_threshold seconds (based on ros_rate) for the TF to arrive
-                max_retries = int(self.cfg.ros_rate * self.cfg.sync_threshold)
-                if retries < max_retries:
-                    self.tf_mode_queue[0] = (rgb_msg, depth_msg, retries + 1)
+                elapsed = time.monotonic() - enqueue_time
+                if elapsed < self.tf_lookup_timeout:
                     break
-                else:
-                    self.logger.warning(
-                        f"[Main] Dropping frame after persistent TF failures ({max_retries} retries): {e}"
-                    )
-                    self.tf_mode_queue.popleft()
-                    continue
+                self.dropped_frame_count += 1
+                self.log_frame_sync(
+                    status="dropped",
+                    rgb_depth_dt=abs(rgb_timestamp - depth_timestamp),
+                    pose_rgb_dt=None,
+                    pose_mode=self.pose_represents,
+                    pose_frames=pose_frames,
+                    reason=f"tf_lookup_timeout({elapsed:.3f}s): {e}",
+                )
+                self.tf_mode_queue.popleft()
+                continue
 
             # Success: remove from queue
             self.tf_mode_queue.popleft()
 
             translation = np.array(trans)
             quaternion = np.array(quat)  # ROS1 tf returns (x, y, z, w)
-            timestamp = stamp.to_sec()
+            timestamp = rgb_timestamp
+            pose_timestamp = rgb_timestamp
+
+            should_process, _ = self.evaluate_frame_sync(
+                rgb_timestamp=rgb_timestamp,
+                depth_timestamp=depth_timestamp,
+                pose_timestamp=pose_timestamp,
+                pose_mode=self.pose_represents,
+                pose_frames=pose_frames,
+            )
+            if not should_process:
+                continue
 
             # Process images (identical to Odometry mode)
             if self.cfg.use_compressed_topic:
@@ -178,7 +245,16 @@ class RunnerROS1(RunnerROSBase):
             depth_img = self.process_depth_image(depth_img, depth_factor)
 
             pose_matrix = self.build_pose_matrix(translation, quaternion)
-            self.push_data(rgb_img, depth_img, pose_matrix, timestamp)
+            self.push_data(
+                rgb_img,
+                depth_img,
+                pose_matrix,
+                timestamp,
+                rgb_timestamp=rgb_timestamp,
+                depth_timestamp=depth_timestamp,
+                pose_timestamp=pose_timestamp,
+                pose_mode=self.pose_represents,
+            )
             self.last_message_time = time.time()
 
     def camera_info_callback(self, msg):

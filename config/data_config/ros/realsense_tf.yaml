@@ -10,25 +10,19 @@ ros_topics:
   camera_info: "/camera/color/camera_info"
   # NOTE: No 'odom' topic defined — the system will use TF mode instead.
 
+pose_represents: "camera_frame"
+
 # TF Configuration
 # The runner will obtain the camera pose by looking up the transform
 # between these two frames at each synchronised image timestamp.
 # Use 'ros2 run tf2_tools view_frames' while playing your rosbag
 # to identify the correct frame names.
-tf_source_frame: "moca_red_franka_base_link"      # Parent frame (fixed/world)
-tf_target_frame: "camera_color_optical_frame"    # Camera frame (moves with the arm)
+tf_world_frame: "moca_red_franka_base_link"     # Fixed/world frame
+tf_camera_frame: "camera_color_optical_frame"   # Optical camera frame
 
 # Depth factor: divisor to convert depth values to metres
 # - For 16UC1 (uint16) depth in millimetres (e.g., RealSense, Orbbec): use 1000.0
 # - For 32FC1 (float32) depth in metres (e.g., Isaac Sim, Gazebo): use 1.0
 depth_factor: 1000.0
 
-# Camera Extrinsic Parameters (Static Transform: Base -> Camera)
-# 4x4 Transformation Matrix (Row-major)
-# If the camera is mounted at the robot's base frame origin (Identity), you can omit this.
-# If pose comes from TF giving the camera_link pose directly, use identity.
-# extrinsics:
-#   - [1.0, 0.0, 0.0, 0.0]
-#   - [0.0, 1.0, 0.0, 0.0]
-#   - [0.0, 0.0, 1.0, 0.0]
-#   - [0.0, 0.0, 0.0, 1.0]
+# No extrinsics are needed here because TF already provides the camera pose.

@@ -22,7 +22,18 @@ ros_stream_config_path: ./config/data_config/ros/realsense_tf.yaml
 use_compressed_topic: false
 
 # Maximum allowed time difference (in seconds) between synchronized topics
-sync_threshold: 0.6
+sync_threshold: 0.05
+
+# Hard per-frame validation thresholds after message_filters synchronisation.
+# Frames outside these bounds are dropped when drop_unsynced_frames is true.
+max_rgb_depth_dt: 0.03
+max_pose_rgb_dt: 0.03
+
+# Maximum wall-clock time to wait for TF to become available for a buffered RGB-D frame.
+tf_lookup_timeout: 0.10
+
+# Drop RGB-D(-pose) frames that exceed the validation thresholds above.
+drop_unsynced_frames: true
 
 
 # ============================================================
