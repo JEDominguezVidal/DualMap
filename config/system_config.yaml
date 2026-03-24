@@ -135,6 +135,13 @@ use_fastsam: True
 #   uncovered_only = only keep masks that add enough novel pixels beyond YOLO/SAM
 #   off = disable FastSAM supplementation entirely
 fastsam_mode: uncovered_only
+# Conservative defaults for tabletop rosbag runs. The goal is to keep only a
+# small number of genuinely novel masks and avoid flooding the unified filter.
+fastsam_uncovered_max_masks: 8
+fastsam_uncovered_max_area_ratio: 0.12
+fastsam_uncovered_min_mask_pixels: 80
+fastsam_uncovered_min_novel_pixels: 150
+fastsam_uncovered_min_novel_ratio: 0.55
 # Minimum confidence threshold for FastSAM detections (0.0 to 1.0)
 fastsam_confidence: 0.50
 # Display FastSAM debug outputs on Rerun (masks, bounding boxes)
@@ -181,7 +188,7 @@ clip_unknown_relabel:
   exclude_bg_classes: true
   exclude_unknown_label: true
   use_image_features_only: true
-  save_debug_scores: true
+  save_debug_scores: false
 
 # In rosbag_tf/tabletop mode, FastSAM masks remain as unknown by default to
 # avoid semantic flicker from CLIP relabeling.
@@ -219,6 +226,9 @@ dbscan_min_points: 5
 # Lower values (e.g. 0.05) produce sparser but faster point clouds.
 # Higher values (e.g. 0.5) produce denser, more accurate clouds at the cost of speed.
 pcd_sample_ratio: 0.10
+# If True, discard observations whose point cloud clustering is ambiguous.
+# Disabled by default because it has not been useful in the recent rosbag_tf runs.
+discard_ambiguous_clusters: false
 
 
 # -------------------------------------------------------
@@ -515,7 +525,7 @@ layout_rotation_threshold: 10.0
 # regions mixing table + objects. These detections are marked as non-trackable
 # and are excluded from object tracking.
 support_surface_filter:
-  enabled: true
+  enabled: false
   max_image_area_ratio: 0.20
   max_z_extent: 0.03
   min_xy_extent: 0.15

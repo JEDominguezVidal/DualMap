@@ -752,18 +752,24 @@ class Detector:
             image_shape = fs_detections.mask.shape[1:]
             covered_mask = np.zeros(image_shape, dtype=bool)
 
-        support_cfg = getattr(self.cfg, "support_surface_filter", None)
-        max_area_ratio = 0.20
-        if support_cfg is not None:
-            max_area_ratio = float(
-                getattr(support_cfg, "max_image_area_ratio", max_area_ratio)
-            )
+        max_area_ratio = float(
+            getattr(self.cfg, "fastsam_uncovered_max_area_ratio", 0.12)
+        )
+        min_mask_pixels = max(
+            int(getattr(self.cfg, "fastsam_uncovered_min_mask_pixels", 80)),
+            int(getattr(self.cfg, "small_mask_th", 20)),
+            20,
+        )
+        min_novel_pixels = max(
+            int(getattr(self.cfg, "fastsam_uncovered_min_novel_pixels", 150)),
+            min_mask_pixels,
+        )
+        min_novel_ratio = float(
+            getattr(self.cfg, "fastsam_uncovered_min_novel_ratio", 0.55)
+        )
+        max_masks = int(getattr(self.cfg, "fastsam_uncovered_max_masks", 8))
 
-        min_mask_pixels = max(int(getattr(self.cfg, "small_mask_th", 20)), 20)
-        min_novel_pixels = max(min_mask_pixels * 2, 20)
-        min_novel_ratio = 0.30
-        keep_mask = np.zeros(num_fs, dtype=bool)
-
+        candidates = []
         for det_idx in range(num_fs):
             mask = np.asarray(fs_detections.mask[det_idx], dtype=bool)
             mask_pixels = int(np.sum(mask))
@@ -781,8 +787,33 @@ class Detector:
             if novel_pixels < min_novel_pixels or novel_ratio < min_novel_ratio:
                 continue
 
+            candidates.append((novel_pixels, novel_ratio, mask_pixels, det_idx, mask))
+
+        if not candidates:
+            return self.slice_detections(
+                fs_detections,
+                np.zeros(num_fs, dtype=bool),
+            )
+
+        keep_mask = np.zeros(num_fs, dtype=bool)
+        kept_count = 0
+        for _, _, _, det_idx, mask in sorted(
+            candidates,
+            key=lambda item: (item[0], item[1], item[2]),
+            reverse=True,
+        ):
+            novel_mask = np.logical_and(mask, np.logical_not(covered_mask))
+            novel_pixels = int(np.sum(novel_mask))
+            novel_ratio = novel_pixels / max(int(np.sum(mask)), 1)
+
+            if novel_pixels < min_novel_pixels or novel_ratio < min_novel_ratio:
+                continue
+
             keep_mask[det_idx] = True
             covered_mask = np.logical_or(covered_mask, mask)
+            kept_count += 1
+            if max_masks > 0 and kept_count >= max_masks:
+                break
 
         return self.slice_detections(fs_detections, keep_mask)
 
@@ -880,7 +911,7 @@ class Detector:
         non_trackable_mask = np.zeros(num_detections, dtype=bool)
 
         if not filter_cfg or not getattr(filter_cfg, "enabled", False) or num_detections == 0:
-            self.annotated_image_support_surface = color.copy()
+            self.annotated_image_support_surface = None
             return (
                 detections,
                 image_feats,
@@ -1167,7 +1198,7 @@ class Detector:
             "support_surface_discarded": 0,
             "ambiguous_cluster_discarded": 0,
         }
-        self.annotated_image_support_surface = color.copy()
+        self.annotated_image_support_surface = None
 
         with timing_context("YOLO+Segmentation+FastSAM", self):
             # Run FastSAM
@@ -1275,7 +1306,7 @@ class Detector:
             relabel_top2_class_ids=relabel_top2_class_ids,
         )
 
-        logger.info(
+        logger.debug(
             "[Detector][KeyframeStats] yolo_base=%d fastsam_extra_accepted=%d "
             "support_surface_discarded=%d ambiguous_cluster_discarded=%d",
             self.last_detection_stats["yolo_base_detections"],
@@ -1413,22 +1444,36 @@ class Detector:
                             downsampled_colors = valid_colors
 
                         # Refine points using clustering
-                        (
-                            refined_points,
-                            refined_colors,
-                            refine_meta,
-                        ) = refine_points_with_clustering(
-                            downsampled_points,
-                            downsampled_colors,
-                            eps=self.cfg.dbscan_eps,
-                            min_points=self.cfg.dbscan_min_points,
-                            return_metadata=True,
+                        discard_ambiguous = bool(
+                            getattr(self.cfg, "discard_ambiguous_clusters", False)
                         )
-
-                        self.mask_processing_meta[msg_idx] = refine_meta
-                        if refine_meta.get("ambiguous", False):
-                            self.last_detection_stats["ambiguous_cluster_discarded"] += 1
-                            continue
+                        if discard_ambiguous:
+                            (
+                                refined_points,
+                                refined_colors,
+                                refine_meta,
+                            ) = refine_points_with_clustering(
+                                downsampled_points,
+                                downsampled_colors,
+                                eps=self.cfg.dbscan_eps,
+                                min_points=self.cfg.dbscan_min_points,
+                                return_metadata=True,
+                            )
+                            self.mask_processing_meta[msg_idx] = refine_meta
+                            if refine_meta.get("ambiguous", False):
+                                self.last_detection_stats["ambiguous_cluster_discarded"] += 1
+                                continue
+                        else:
+                            refined_points, refined_colors = refine_points_with_clustering(
+                                downsampled_points,
+                                downsampled_colors,
+                                eps=self.cfg.dbscan_eps,
+                                min_points=self.cfg.dbscan_min_points,
+                            )
+                            self.mask_processing_meta[msg_idx] = {
+                                "ambiguous": False,
+                                "num_clusters": 0,
+                            }
 
                         self.masked_points[msg_idx] = refined_points
                         self.masked_colors[msg_idx] = refined_colors
@@ -1578,7 +1623,10 @@ class Detector:
 
         cv2.imwrite(str(output_file_path), annotated_image)
 
-        if self.annotated_image_support_surface is not None:
+        if (
+            self.annotated_image_support_surface is not None
+            and self.last_detection_stats.get("support_surface_discarded", 0) > 0
+        ):
             support_output_path = (
                 self.detection_path
                 / "vis"

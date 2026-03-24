@@ -152,7 +152,7 @@ class LocalMapManager(BaseMapManager):
 
             self.init_from_observation(curr_observations)
             self.is_initialized = True
-            logger.info(
+            logger.debug(
                 "[LocalMap] Frame summary: observations=%d added_local_objects=%d local_map_size=%d",
                 len(curr_observations),
                 len(curr_observations),
@@ -163,7 +163,7 @@ class LocalMapManager(BaseMapManager):
         if len(curr_observations) == 0:
             logger.warning("[LocalMap] No observation in this frame")
             self.update_local_map(curr_observations)
-            logger.info(
+            logger.debug(
                 "[LocalMap] Frame summary: observations=0 added_local_objects=0 local_map_size=%d",
                 len(self.local_map),
             )
@@ -182,7 +182,7 @@ class LocalMapManager(BaseMapManager):
 
         # Update local map
         self.update_local_map(curr_observations)
-        logger.info(
+        logger.debug(
             "[LocalMap] Frame summary: observations=%d added_local_objects=%d local_map_size=%d",
             len(curr_observations),
             self.tracker.get_last_added_new_objects(),

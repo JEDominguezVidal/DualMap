@@ -560,7 +560,7 @@ class BaseObject:
         self.last_geometry_update_mode = mode_used
 
         if log_decision and mode == "hybrid":
-            logger.info(
+            logger.debug(
                 "[%s] geometry_update=%s uid=%s fitness=%.3f rmse=%.4f centroid_shift=%.4f reason=%s",
                 self.__class__.__name__,
                 mode_used,

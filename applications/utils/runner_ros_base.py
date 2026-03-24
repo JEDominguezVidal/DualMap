@@ -438,7 +438,7 @@ class RunnerROSBase:
             return
 
         data_input.idx = self.dualmap.get_keyframe_idx()
-        self.logger.info(
+        self.logger.debug(
             "[Main] Accepted keyframe %d by %s",
             data_input.idx,
             getattr(self.dualmap, "last_keyframe_reason", "unknown"),
