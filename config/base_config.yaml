@@ -30,8 +30,8 @@
 # ============================================================
 # ROS CONFIG
 # ============================================================
-dataset_name: kairos
-scene_id: experimental_room_depth_anything_normalized_5
+dataset_name: rosbag_tf
+scene_id: franka_desk_tidy_necessary_objects_05_after_blurry_fix_moving_left_and_right
 # # Static scene at Floor 0
 # dataset_name: rosbag
 # scene_id: rosbag_realsense_floor_0_depth_enhanced_1
@@ -43,6 +43,139 @@ scene_id: experimental_room_depth_anything_normalized_5
 # # Static scene at experimental room with better depth estimation
 # dataset_name: kairos
 # scene_id: experimental_room_depth_anything_normalized_4
+
+# # Static scene at experimental room with better depth estimation and ICP (icp_fitness_threshold = 0.3)
+# dataset_name: kairos
+# scene_id: experimental_room_depth_anything_normalized_5
+
+# # Static scene at experimental room with better depth estimation and ICP (icp_fitness_threshold = 0.8 and icp_distance_threshold = 0.4)
+# dataset_name: kairos
+# scene_id: experimental_room_depth_anything_normalized_7
+
+# # # Static scene at experimental room with better depth estimation and ICP (icp_fitness_threshold = 0.8, icp_distance_threshold = 0.4, and merge_local_map: True)
+# dataset_name: kairos
+# scene_id: experimental_room_depth_anything_normalized_8
+
+# # Static scene at experimental room with better depth estimation and ICP (icp_fitness_threshold = 0.8, icp_distance_threshold = 0.4, merge_local_map: True, and merge_sim_threshold: 0.6)
+# dataset_name: kairos
+# scene_id: experimental_room_depth_anything_normalized_9
+
+# Static scene at experimental room with better depth estimation and ICP (icp_fitness_threshold = 0.8, icp_distance_threshold = 0.4, merge_local_map: True, merge_sim_threshold: 0.8, and sim_threshold = 1.2)
+# dataset_name: kairos
+# scene_id: experimental_room_depth_anything_normalized_11
+
+# # Static scene with extra irrelevant objects 
+# dataset_name: rosbag_tf
+# scene_id: franka_desk_00
+
+# # Static scene with extra irrelevant objects without desk in the object list
+# dataset_name: rosbag_tf
+# scene_id: franka_desk_01
+
+# # Static scene with extra irrelevant objects without desk in the object list and no ICP
+# dataset_name: rosbag_tf
+# scene_id: franka_desk_02
+
+# # Static scene with extra irrelevant objects without desk in the object list and no ICP and tf_target_frame: "camera_color_optical_frame"
+# dataset_name: rosbag_tf
+# scene_id: franka_desk_03
+
+# # Static scene with extra irrelevant objects without desk in the object list, ICP, and tf_target_frame: "camera_color_optical_frame"
+# dataset_name: rosbag_tf
+# scene_id: franka_desk_04
+
+# # Static scene with extra irrelevant objects without desk in the object list, ICP with icp_distance_threshold: 0.05, and tf_target_frame: "camera_color_optical_frame"
+# dataset_name: rosbag_tf
+# scene_id: franka_desk_05
+
+# # Static scene with extra irrelevant objects without desk in the object list, ICP with icp_distance_threshold: 0.10, and tf_target_frame: "camera_color_optical_frame"
+# dataset_name: rosbag_tf
+# scene_id: franka_desk_06
+
+# # Static scene with extra irrelevant objects without desk in the object list, ICP with icp_distance_threshold: 0.02, and tf_target_frame: "camera_color_optical_frame"
+# dataset_name: rosbag_tf
+# scene_id: franka_desk_07
+
+# # Static scene with extra irrelevant objects without desk in the object list, ICP with icp_distance_threshold: 0.05, icp_fitness_threshold: 0.3, and tf_target_frame: "camera_color_optical_frame"
+# dataset_name: rosbag_tf
+# scene_id: franka_desk_08
+
+# # Static scene with extra irrelevant objects without desk in the object list, ICP with icp_distance_threshold: 0.10, icp_fitness_threshold: 0.3, and tf_target_frame: "camera_color_optical_frame"
+# dataset_name: rosbag_tf
+# scene_id: franka_desk_09
+
+# # Static scene with extra irrelevant objects without desk in the object list, ICP with icp_distance_threshold: 0.10, icp_fitness_threshold: 0.3, tf_target_frame: "camera_color_optical_frame", and tracked modified to accept IoU = 0 if objects at less than 15 cm adn FAISS radius=0.10
+# dataset_name: rosbag_tf
+# scene_id: franka_desk_10
+
+# # Static scene with tidy desk and only necessary objects. FastSAM activated, without desk in the object list
+# dataset_name: rosbag_tf
+# scene_id: franka_desk_tidy_necessary_objects_00
+
+# # Static scene with tidy desk and only necessary objects. FastSAM activated, with desk in the object list
+# dataset_name: rosbag_tf
+# scene_id: franka_desk_tidy_necessary_objects_01
+
+# # Static scene with tidy desk and only necessary objects. FastSAM activated, with desk in the object list but also in the background classes that will be ignored during detection
+# dataset_name: rosbag_tf
+# scene_id: franka_desk_tidy_necessary_objects_02
+
+# # Static scene with tidy desk and only necessary objects. FastSAM activated, with desk in the object list but also in the background classes that will be ignored during detection, and centroid_dist > 0.01 in tracker.py
+# dataset_name: rosbag_tf
+# scene_id: franka_desk_tidy_necessary_objects_03
+
+# # Static scene with tidy desk and only necessary objects. FastSAM activated, with desk in the object list but also in the background classes that will be ignored during detection, centroid_dist > 0.01 in tracker.py, and max_detection_distance: 1.0
+# dataset_name: rosbag_tf
+# scene_id: franka_desk_tidy_necessary_objects_04
+
+# # Static scene with tidy desk and only necessary objects. Execution after all the modifications to avoid blurry segmentations. Static camera 
+# dataset_name: rosbag_tf
+# scene_id: franka_desk_tidy_necessary_objects_00_after_blurry_fix_static
+
+# # Static scene with tidy desk and only necessary objects. Execution after all the modifications to avoid blurry segmentations. Dynamic camera (moving left and right)
+# dataset_name: rosbag_tf
+# scene_id: franka_desk_tidy_necessary_objects_00_after_blurry_fix_moving_left_and_right
+
+# # Static scene with tidy desk and only necessary objects. Execution after second round of the modifications to avoid blurry segmentations. Static camera 
+# dataset_name: rosbag_tf
+# scene_id: franka_desk_tidy_necessary_objects_01_after_blurry_fix_static
+
+# # Static scene with tidy desk and only necessary objects. Execution after second round of the modifications to avoid blurry segmentations. Dynamic camera (moving left and right)
+# dataset_name: rosbag_tf
+# scene_id: franka_desk_tidy_necessary_objects_01_after_blurry_fix_moving_left_and_right
+
+# # Static scene with tidy desk and only necessary objects. Execution after third round of the modifications to avoid blurry segmentations. Static camera 
+# dataset_name: rosbag_tf
+# scene_id: franka_desk_tidy_necessary_objects_02_after_blurry_fix_static
+
+# # Static scene with tidy desk and only necessary objects. Execution after third round of the modifications to avoid blurry segmentations. Dynamic camera (moving left and right)
+# dataset_name: rosbag_tf
+# scene_id: franka_desk_tidy_necessary_objects_02_after_blurry_fix_moving_left_and_right
+
+# # Static scene with tidy desk and only necessary objects. Execution after forth round of the modifications to avoid blurry segmentations. Static camera 
+# dataset_name: rosbag_tf
+# scene_id: franka_desk_tidy_necessary_objects_03_after_blurry_fix_static
+
+# # Static scene with tidy desk and only necessary objects. Execution after forth round of the modifications to avoid blurry segmentations. Dynamic camera (moving left and right)
+# dataset_name: rosbag_tf
+# scene_id: franka_desk_tidy_necessary_objects_03_after_blurry_fix_moving_left_and_right
+
+# # Static scene with tidy desk and only necessary objects. Execution after fifth round of the modifications to avoid blurry segmentations. Static camera 
+# dataset_name: rosbag_tf
+# scene_id: franka_desk_tidy_necessary_objects_04_after_blurry_fix_static
+
+# # Static scene with tidy desk and only necessary objects. Execution after fifth round of the modifications to avoid blurry segmentations. Dynamic camera (moving left and right)
+# dataset_name: rosbag_tf
+# scene_id: franka_desk_tidy_necessary_objects_04_after_blurry_fix_moving_left_and_right
+
+# # Static scene with tidy desk and only necessary objects. Execution after sixth round of the modifications to avoid blurry segmentations. Static camera 
+# dataset_name: rosbag_tf
+# scene_id: franka_desk_tidy_necessary_objects_05_after_blurry_fix_static
+
+# # Static scene with tidy desk and only necessary objects. Execution after sixth round of the modifications to avoid blurry segmentations. Dynamic camera (moving left and right)
+# dataset_name: rosbag_tf
+# scene_id: franka_desk_tidy_necessary_objects_05_after_blurry_fix_moving_left_and_right
+
 
 # ============================================================
 # OUTPUT CONFIG

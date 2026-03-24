@@ -103,7 +103,15 @@ def init_pcd_denoise_dbscan(
     return pcd
 
 
-def refine_points_with_clustering(points, colors, eps=0.05, min_points=10):
+def refine_points_with_clustering(
+    points,
+    colors,
+    eps=0.05,
+    min_points=10,
+    *,
+    return_metadata=False,
+    ambiguity_ratio_threshold=0.6,
+):
     """
     Cluster the point cloud using Open3D's DBSCAN and extract the largest cluster.
 
@@ -116,16 +124,24 @@ def refine_points_with_clustering(points, colors, eps=0.05, min_points=10):
     Returns:
     - refined_points: Filtered point cloud coordinates (numpy.ndarray).
     - refined_colors: Filtered point cloud colors (numpy.ndarray).
+    - metadata (optional): Dict with clustering diagnostics.
     """
+    metadata = {"ambiguous": False, "num_clusters": 0}
+
+    def _empty_result():
+        empty_points = np.empty((0, 3), dtype=np.float32)
+        empty_colors = np.empty((0, 3), dtype=np.float32)
+        if return_metadata:
+            return empty_points, empty_colors, metadata
+        return empty_points, empty_colors
+
     # Convert to numpy format
     points_np = points.cpu().numpy()
     colors_np = colors.cpu().numpy()
 
     # If there are no points, return empty arrays to avoid further processing
     if points_np.shape[0] == 0:
-        # print("No points found in the input point cloud.")
-        # FIXED: [KDTreeFlann::SetRawData] Failed due to no data warning
-        return np.empty((0, 3), dtype=np.float32), np.empty((0, 3), dtype=np.float32)
+        return _empty_result()
 
     # Create Open3D point cloud object
     pcd = o3d.geometry.PointCloud()
@@ -150,8 +166,16 @@ def refine_points_with_clustering(points, colors, eps=0.05, min_points=10):
 
     # Check if there are still clusters
     if len(unique_labels) == 0:
-        # print("No valid clusters found after removing noise.")
-        return np.empty((0, 3), dtype=np.float32), np.empty((0, 3), dtype=np.float32)
+        return _empty_result()
+
+    metadata["num_clusters"] = int(len(unique_labels))
+
+    sorted_counts = np.sort(counts)[::-1]
+    if len(sorted_counts) > 1:
+        ambiguity_ratio = sorted_counts[1] / max(sorted_counts[0], 1)
+        if ambiguity_ratio >= ambiguity_ratio_threshold:
+            metadata["ambiguous"] = True
+            return _empty_result()
 
     # Find the largest cluster
     max_label = unique_labels[np.argmax(counts)]
@@ -161,7 +185,9 @@ def refine_points_with_clustering(points, colors, eps=0.05, min_points=10):
     refined_points_np = points_np[mask]
     refined_colors_np = colors_np[mask]
 
-    # Return as numpy arrays
+    if return_metadata:
+        return refined_points_np, refined_colors_np, metadata
+
     return refined_points_np, refined_colors_np
 
 

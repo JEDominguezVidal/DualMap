@@ -30,6 +30,7 @@ class Tracker:
         self.__is_global = False
 
         self.merge_info = None
+        self.last_added_new_objects = 0
 
     def set_ref_map(
         self,
@@ -55,11 +56,74 @@ class Tracker:
     def get_merge_info(self):
         return self.merge_info
 
+    def get_last_added_new_objects(self):
+        return self.last_added_new_objects
+
     def set_global(
         self,
     ) -> None:
         self.__is_global = True
         return
+
+    def is_unknown_class_id(self, class_id) -> bool:
+        unknown_class_id = getattr(self.cfg, "unknown_class_id", None)
+        return unknown_class_id is not None and class_id == unknown_class_id
+
+    @staticmethod
+    def compute_bbox_volume(bbox) -> float:
+        extent = np.asarray(bbox.get_extent(), dtype=np.float32)
+        return float(np.prod(np.maximum(extent, 1e-6)))
+
+    def apply_local_match_vetoes(
+        self,
+        spatial_sim_mat: torch.Tensor,
+        visual_sim_mat: torch.Tensor,
+    ):
+        max_bbox_volume_ratio = float(
+            getattr(
+                self.cfg.object_tracking,
+                "max_bbox_volume_ratio",
+                float("inf"),
+            )
+        )
+
+        spatial_sim_mat = spatial_sim_mat.clone()
+        visual_sim_mat = visual_sim_mat.clone()
+        veto_count = 0
+
+        for map_idx, map_obj in enumerate(self.ref_map):
+            map_volume = self.compute_bbox_volume(map_obj.bbox)
+
+            for obs_idx, obs in enumerate(self.curr_frame):
+                if getattr(obs, "non_trackable", False):
+                    spatial_sim_mat[map_idx, obs_idx] = 0.0
+                    visual_sim_mat[map_idx, obs_idx] = 0.0
+                    veto_count += 1
+                    continue
+
+                spatial_value = float(spatial_sim_mat[map_idx, obs_idx])
+
+                obs_volume = self.compute_bbox_volume(obs.bbox)
+                volume_ratio = max(map_volume, obs_volume) / max(
+                    min(map_volume, obs_volume),
+                    1e-6,
+                )
+                if (
+                    np.isfinite(max_bbox_volume_ratio)
+                    and volume_ratio > max_bbox_volume_ratio
+                    and spatial_value < 0.2
+                ):
+                    spatial_sim_mat[map_idx, obs_idx] = 0.0
+                    visual_sim_mat[map_idx, obs_idx] = 0.0
+                    veto_count += 1
+
+        if veto_count > 0:
+            logger.info(
+                "[Tracker] Applied %d local match vetoes before association.",
+                veto_count,
+            )
+
+        return spatial_sim_mat, visual_sim_mat
 
     def matching_map(
         self,
@@ -69,12 +133,7 @@ class Tracker:
         # Find relationships between current observations and previous map
 
         if self.__is_global:
-            # for global matching we use geometry only
-            spatial_sim_mat = self.compute_global_spatial_sim()
-
-            sim_mat = spatial_sim_mat.T
-
-            self.update_global_obs_with_sim_mat(sim_mat)
+            self.match_global_greedy()
 
         else:
             if is_map_only:
@@ -109,6 +168,10 @@ class Tracker:
                 )
                 return
 
+            spatial_sim_mat, visual_sim_mat = self.apply_local_match_vetoes(
+                spatial_sim_mat, visual_sim_mat
+            )
+
             # overall sim
             sim_mat = spatial_sim_mat + visual_sim_mat
             # switch (map, curr) to (curr, map)
@@ -121,7 +184,14 @@ class Tracker:
 
                 return
 
-            self.update_obs_with_sim_mat(sim_mat)
+            bbox_iou_mat, centroid_dist_mat = self.compute_local_iou_and_centroid_dist()
+            self.update_obs_with_sim_mat(
+                sim_mat,
+                spatial_sim_mat=spatial_sim_mat,
+                visual_sim_mat=visual_sim_mat,
+                bbox_iou_mat=bbox_iou_mat,
+                centroid_dist_mat=centroid_dist_mat,
+            )
 
     def compute_overlap_spatial_sim(self) -> np.ndarray:
         len_map = len(self.ref_map)
@@ -269,10 +339,6 @@ class Tracker:
         len_map = len(self.ref_map)
         len_curr = len(self.curr_frame)
 
-        logger.info(
-            f"[Tracker][Global] Current obs num: {len_curr}, current map num: {len_map}"
-        )
-
         # Get stacked bboxes for iou calculation
         map_bbox_values = []
 
@@ -307,6 +373,58 @@ class Tracker:
         )
 
         return ratio
+
+    def compute_global_centroid_distances(self) -> np.ndarray:
+        len_map = len(self.ref_map)
+        len_curr = len(self.curr_frame)
+
+        if len_map == 0 or len_curr == 0:
+            return np.zeros((len_curr, len_map), dtype=np.float32)
+
+        map_centers = np.array(
+            [obj.bbox_2d.get_center()[:2] for obj in self.ref_map],
+            dtype=np.float32,
+        )
+        curr_centers = np.array(
+            [obs.bbox_2d.get_center()[:2] for obs in self.curr_frame],
+            dtype=np.float32,
+        )
+
+        return np.linalg.norm(
+            curr_centers[:, None, :] - map_centers[None, :, :],
+            axis=2,
+        ).astype(np.float32)
+
+    def compute_local_iou_and_centroid_dist(self):
+        len_map = len(self.ref_map)
+        len_curr = len(self.curr_frame)
+
+        if len_map == 0 or len_curr == 0:
+            return (
+                torch.zeros((len_map, len_curr), dtype=torch.float32),
+                torch.zeros((len_map, len_curr), dtype=torch.float32),
+            )
+
+        map_bbox_values = []
+        for obj in self.ref_map:
+            obj_bbox = np.asarray(obj.bbox.get_box_points())
+            map_bbox_values.append(torch.from_numpy(obj_bbox))
+
+        curr_bbox_values = []
+        for obs in self.curr_frame:
+            obs_bbox = np.asarray(obs.bbox.get_box_points())
+            curr_bbox_values.append(torch.from_numpy(obs_bbox))
+
+        map_bbox_torch = torch.stack(map_bbox_values, dim=0)
+        curr_bbox_torch = torch.stack(curr_bbox_values, dim=0)
+
+        iou = self.compute_3d_iou_batch(map_bbox_torch, curr_bbox_torch)
+
+        map_centroids = torch.mean(map_bbox_torch, dim=1).float()
+        curr_centroids = torch.mean(curr_bbox_torch, dim=1).float()
+        centroid_dist = torch.cdist(map_centroids, curr_centroids, p=2)
+
+        return iou, centroid_dist.cpu()
 
     def compute_match_by_intersection_ratio(
         self, bboxes1: torch.Tensor, bboxes2: torch.Tensor, threshold=0.8
@@ -402,7 +520,14 @@ class Tracker:
 
         return visual_sim
 
-    def update_obs_with_sim_mat(self, sim_mat: torch.Tensor) -> None:
+    def update_obs_with_sim_mat(
+        self,
+        sim_mat: torch.Tensor,
+        spatial_sim_mat: torch.Tensor | None = None,
+        visual_sim_mat: torch.Tensor | None = None,
+        bbox_iou_mat: torch.Tensor | None = None,
+        centroid_dist_mat: torch.Tensor | None = None,
+    ) -> None:
         # update the obs in current frame with the matched map
         # IF no matches, then the current obs matched places will be None
 
@@ -410,56 +535,269 @@ class Tracker:
         len_curr_obs = len(self.curr_frame)
 
         add_new_obj = 0
+        spawn_reasons = {
+            "volume_veto": 0,
+            "low_clip": 0,
+            "low_geometry": 0,
+            "no_candidate": 0,
+            "non_trackable": 0,
+        }
+        use_one_to_one = bool(getattr(self.cfg, "local_one_to_one_matching", True))
+        assigned_map_indices = set()
+        sim_mat_np = self.to_numpy_array(sim_mat)
+
+        for obs in self.curr_frame:
+            obs.matched_obj_idx = -1
+            obs.matched_obj_uid = None
+            obs.matched_obj_score = 0.0
+
+        if use_one_to_one and sim_mat_np is not None and sim_mat_np.size > 0:
+            candidates = []
+            for obs_idx in range(len_curr_obs):
+                if getattr(self.curr_frame[obs_idx], "non_trackable", False):
+                    continue
+                row = sim_mat_np[obs_idx]
+                if row.size == 0:
+                    continue
+                map_idx = int(np.argmax(row))
+                score = float(row[map_idx])
+                if score > self.cfg.sim_threshold:
+                    candidates.append((score, obs_idx, map_idx))
+
+            for score, obs_idx, map_idx in sorted(
+                candidates,
+                key=lambda item: item[0],
+                reverse=True,
+            ):
+                if map_idx in assigned_map_indices:
+                    continue
+                self.curr_frame[obs_idx].matched_obj_uid = self.ref_map[map_idx].uid
+                self.curr_frame[obs_idx].matched_obj_score = score
+                self.curr_frame[obs_idx].matched_obj_idx = map_idx
+                assigned_map_indices.add(map_idx)
 
         # update information into current observation
         for idx in range(len_curr_obs):
-            max_sim_value = sim_mat[idx].max()
-            if max_sim_value > self.cfg.sim_threshold:
-                map_idx = sim_mat[idx].argmax().item()
-                self.curr_frame[idx].matched_obj_uid = self.ref_map[map_idx].uid
-                self.curr_frame[idx].matched_obj_score = max_sim_value
-                self.curr_frame[idx].matched_obj_idx = map_idx
-            else:
-                self.curr_frame[idx].matched_obj_uid = None
-                add_new_obj += 1
+            if self.curr_frame[idx].matched_obj_idx != -1:
+                continue
+            matched, reason = self.try_local_continuity_match(
+                obs_idx=idx,
+                spatial_sim_mat=spatial_sim_mat,
+                visual_sim_mat=visual_sim_mat,
+                bbox_iou_mat=bbox_iou_mat,
+                centroid_dist_mat=centroid_dist_mat,
+                excluded_map_indices=assigned_map_indices if use_one_to_one else None,
+            )
+            if matched:
+                assigned_map_indices.add(self.curr_frame[idx].matched_obj_idx)
+                continue
+            add_new_obj += 1
+            spawn_reasons[reason] = spawn_reasons.get(reason, 0) + 1
 
+        self.last_added_new_objects = add_new_obj
         logger.info(
             f"[Tracker] Added {add_new_obj} new objects, current detections: {len_curr_obs}"
         )
+        if add_new_obj > 0:
+            logger.info("[Tracker] Spawn reasons for unmatched detections: %s", spawn_reasons)
 
-    def update_global_obs_with_sim_mat(self, sim_mat: torch.Tensor) -> None:
-        len_curr_obs = len(self.curr_frame)
+    @staticmethod
+    def to_numpy_array(matrix):
+        if matrix is None:
+            return None
+        if isinstance(matrix, np.ndarray):
+            return matrix
+        if hasattr(matrix, "cpu") and hasattr(matrix, "numpy"):
+            return matrix.cpu().numpy()
+        return np.asarray(matrix)
 
-        add_new_obj = 0
+    def try_local_continuity_match(
+        self,
+        obs_idx: int,
+        spatial_sim_mat: torch.Tensor | None,
+        visual_sim_mat: torch.Tensor | None,
+        bbox_iou_mat: torch.Tensor | None,
+        centroid_dist_mat: torch.Tensor | None,
+        excluded_map_indices: set | None = None,
+    ) -> tuple[bool, str]:
+        if (
+            spatial_sim_mat is None
+            or visual_sim_mat is None
+            or bbox_iou_mat is None
+            or centroid_dist_mat is None
+            or (spatial_sim_mat.numel() if hasattr(spatial_sim_mat, "numel") else np.size(spatial_sim_mat)) == 0
+        ):
+            return False, "no_candidate"
 
-        for obs_idx in range(len_curr_obs):
-            max_sim_value = sim_mat[obs_idx].max()
+        obs = self.curr_frame[obs_idx]
+        if getattr(obs, "non_trackable", False):
+            return False, "non_trackable"
 
-            # Use configurable threshold
-            if max_sim_value > self.cfg.object_tracking.max_similarity:
-                map_idx = sim_mat[obs_idx].argmax().item()
+        min_clip_similarity = 0.30
+        max_centroid_dist = 0.04
+        min_overlap = 0.10
+        min_bbox_iou = 0.02
+        max_bbox_volume_ratio = float(
+            getattr(
+                self.cfg.object_tracking,
+                "max_bbox_volume_ratio",
+                float("inf"),
+            )
+        )
 
-                # print obs_idx, map_idx, max_sim_value
-                logger.info(
-                    f"[Tracker][Global] obs_idx: {obs_idx}, map_idx: {map_idx}, max_sim_value: {max_sim_value}  "
+        best_candidate = None
+        best_score = -np.inf
+        best_reason = "no_candidate"
+
+        for map_idx, map_obj in enumerate(self.ref_map):
+            if excluded_map_indices is not None and map_idx in excluded_map_indices:
+                continue
+            bbox_iou = float(bbox_iou_mat[map_idx, obs_idx])
+            spatial_overlap = float(spatial_sim_mat[map_idx, obs_idx])
+            map_volume = self.compute_bbox_volume(map_obj.bbox)
+            obs_volume = self.compute_bbox_volume(obs.bbox)
+            volume_ratio = max(map_volume, obs_volume) / max(
+                min(map_volume, obs_volume),
+                1e-6,
+            )
+            if volume_ratio > max_bbox_volume_ratio and max(spatial_overlap, bbox_iou) < min_overlap:
+                best_reason = "volume_veto"
+                continue
+
+            clip_cos = float(visual_sim_mat[map_idx, obs_idx])
+            if clip_cos < min_clip_similarity:
+                if best_reason == "no_candidate":
+                    best_reason = "low_clip"
+                continue
+
+            centroid_dist = float(centroid_dist_mat[map_idx, obs_idx])
+            if centroid_dist > max_centroid_dist:
+                if best_reason in {"no_candidate", "low_clip"}:
+                    best_reason = "low_geometry"
+                continue
+
+            centroid_score = max(
+                0.0, 1.0 - (centroid_dist / max(max_centroid_dist, 1e-6))
+            )
+            score = clip_cos + max(spatial_overlap, bbox_iou) + (0.25 * centroid_score)
+            if score > best_score:
+                best_score = score
+                best_candidate = map_idx
+
+        if best_candidate is None:
+            return False, best_reason
+
+        self.curr_frame[obs_idx].matched_obj_uid = self.ref_map[best_candidate].uid
+        self.curr_frame[obs_idx].matched_obj_score = float(best_score)
+        self.curr_frame[obs_idx].matched_obj_idx = best_candidate
+        return True, "matched"
+
+    @staticmethod
+    def compute_centroid_score(distance: float, max_distance: float) -> float:
+        return max(0.0, 1.0 - (distance / max(max_distance, 1e-6)))
+
+    def get_global_match_spec(self, obs_class, map_class):
+        obs_unknown = self.is_unknown_class_id(obs_class)
+        map_unknown = self.is_unknown_class_id(map_class)
+
+        if not obs_unknown and not map_unknown:
+            if obs_class != map_class:
+                return None
+            return {
+                "name": "same_known",
+                "min_clip": 0.25,
+                "max_centroid": 0.04,
+                "min_overlap": 0.20,
+                "min_score": 0.55,
+            }
+
+        if obs_unknown and not map_unknown:
+            return {
+                "name": "unknown_to_known",
+                "min_clip": 0.35,
+                "max_centroid": 0.03,
+                "min_overlap": 0.35,
+                "min_score": 0.65,
+            }
+
+        if obs_unknown and map_unknown:
+            return {
+                "name": "unknown_to_unknown",
+                "min_clip": 0.35,
+                "max_centroid": 0.03,
+                "min_overlap": 0.35,
+                "min_score": 0.65,
+            }
+
+        return None
+
+    def match_global_greedy(self) -> None:
+        len_curr = len(self.curr_frame)
+        len_map = len(self.ref_map)
+
+        for obs in self.curr_frame:
+            obs.matched_obj_idx = -1
+            obs.matched_obj_uid = None
+            obs.matched_obj_score = 0.0
+
+        if len_curr == 0 or len_map == 0:
+            self.last_added_new_objects = len_curr
+            logger.info(
+                "[Tracker][Global] Added %d new objects, current observations: %d",
+                len_curr,
+                len_curr,
+            )
+            return
+
+        overlap_mat = self.compute_global_spatial_sim().T.cpu().numpy()
+        centroid_dist_mat = self.compute_global_centroid_distances()
+        clip_sim_mat = self.compute_visual_sim().T.cpu().numpy()
+        candidates = []
+        for obs_idx, obs in enumerate(self.curr_frame):
+            obs_class = getattr(obs, "class_id", None)
+            for map_idx, map_obj in enumerate(self.ref_map):
+                map_class = getattr(map_obj, "class_id", None)
+                spec = self.get_global_match_spec(obs_class, map_class)
+                if spec is None:
+                    continue
+
+                clip_cos = float(clip_sim_mat[obs_idx, map_idx])
+                if clip_cos < spec["min_clip"]:
+                    continue
+
+                overlap = float(overlap_mat[obs_idx, map_idx])
+                centroid_dist = float(centroid_dist_mat[obs_idx, map_idx])
+                if overlap < spec["min_overlap"] and centroid_dist > spec["max_centroid"]:
+                    continue
+
+                centroid_score = self.compute_centroid_score(
+                    centroid_dist, spec["max_centroid"]
                 )
+                score = (0.50 * clip_cos) + (0.35 * overlap) + (0.15 * centroid_score)
+                if score < spec["min_score"]:
+                    continue
 
-                self.curr_frame[obs_idx].matched_obj_uid = self.ref_map[map_idx].uid
-                self.curr_frame[obs_idx].matched_obj_score = sim_mat[obs_idx][
-                    map_idx
-                ].item()
-                self.curr_frame[obs_idx].matched_obj_idx = map_idx
+                candidates.append((score, obs_idx, map_idx))
 
-                logger.info(
-                    f"[Tracker][Global] Finding matching, obj from observation is: {self.curr_frame[obs_idx].class_id}, matched map obj is : {self.ref_map[map_idx].class_id}, score: {max_sim_value}"
-                )
+        assigned_obs = set()
+        assigned_map = set()
+        match_count = 0
+        for score, obs_idx, map_idx in sorted(candidates, key=lambda item: item[0], reverse=True):
+            if obs_idx in assigned_obs or map_idx in assigned_map:
+                continue
+            self.curr_frame[obs_idx].matched_obj_uid = self.ref_map[map_idx].uid
+            self.curr_frame[obs_idx].matched_obj_score = float(score)
+            self.curr_frame[obs_idx].matched_obj_idx = map_idx
+            assigned_obs.add(obs_idx)
+            assigned_map.add(map_idx)
+            match_count += 1
 
-            else:
-                self.curr_frame[obs_idx].matched_obj_uid = None
-                add_new_obj += 1
-
+        self.last_added_new_objects = len_curr - match_count
         logger.info(
-            f"[Tracker][Global] Added {add_new_obj} new objects, current observations: {len_curr_obs}"
+            "[Tracker][Global] Matched %d/%d observations, added %d new objects.",
+            match_count,
+            len_curr,
+            self.last_added_new_objects,
         )
 
     def find_overlapping_ratio_faiss(self, pcd1, pcd2, radius=0.02):

@@ -35,7 +35,7 @@ yolo:
   ## The given classes lists
   ## Indoor Classes List
   # given_classes_path: ./config/class_list/hm3d300_classes_ycb.txt
-  given_classes_path: ./config/class_list/gpt_rosbag_indoor_lab_desk_2.txt
+  given_classes_path: ./config/class_list/gpt_rosbag_indoor_lab_desk_3.txt
   # given_classes_path: ./config/class_list/gpt_rosbag_indoor_lab.txt
   # given_classes_path: ./config/class_list/gpt_indoor_office.txt
   # given_classes_path: ./config/class_list/gpt_indoor_apartment.txt
@@ -130,10 +130,15 @@ show_3d_bbox_overlapped: False
 # for objects that YOLO may miss. Enabling it improves recall at the cost of speed.
 # Use FastSAM for Open-Vocabulary supplementation
 use_fastsam: True
+# FastSAM operating mode:
+#   full = legacy behaviour
+#   uncovered_only = only keep masks that add enough novel pixels beyond YOLO/SAM
+#   off = disable FastSAM supplementation entirely
+fastsam_mode: uncovered_only
 # Minimum confidence threshold for FastSAM detections (0.0 to 1.0)
 fastsam_confidence: 0.50
 # Display FastSAM debug outputs on Rerun (masks, bounding boxes)
-show_fastsam_debug: True
+show_fastsam_debug: False
 # Whether to restrict promotion of "unknown" objects to the global map.
 # Set to False to allow FastSAM objects to be saved even if not identified by YOLO.
 restrict_unknown_labels: false
@@ -177,6 +182,10 @@ clip_unknown_relabel:
   exclude_unknown_label: true
   use_image_features_only: true
   save_debug_scores: true
+
+# In rosbag_tf/tabletop mode, FastSAM masks remain as unknown by default to
+# avoid semantic flicker from CLIP relabeling.
+clip_relabel_fastsam: false
 
 
 # -------------------------------------------------------
@@ -244,6 +253,29 @@ icp_min_points: 10
 # but more cases where ICP is skipped. 0.3 is permissive; 0.8 is strict.
 icp_fitness_threshold: 0.3
 
+# -------------------------------------------------------
+# OBJECT GEOMETRY UPDATE SETTINGS
+# -------------------------------------------------------
+# Controls how a tracked object's canonical 3D point cloud is updated when the
+# same object is observed again.
+#   auto = hybrid for rosbag_tf, append for other datasets
+#   append = legacy behaviour; keep accumulating points over time
+#   replace = replace the object's geometry with the newest observation
+#   hybrid = use the newest observation as reference and only merge if the
+#            historical cloud aligns with high confidence; otherwise replace
+object_geometry_update_mode: auto
+# ICP voxel size used by the hybrid geometry update. This should be tuned for
+# tabletop object scale, not for full-scene registration.
+object_geometry_icp_voxel_size: 0.01
+# Maximum correspondence distance for the hybrid alignment stage.
+object_geometry_icp_distance_threshold: 0.02
+# Minimum number of downsampled points required in both clouds for hybrid ICP.
+object_geometry_icp_min_points: 20
+# Hybrid merge is accepted only if all quality gates below are satisfied.
+object_geometry_merge_min_fitness: 0.85
+object_geometry_merge_max_rmse: 0.01
+object_geometry_merge_max_centroid_shift: 0.015
+
 
 # -------------------------------------------------------
 # MATCHING / TRACKING CONFIG
@@ -264,16 +296,20 @@ icp_fitness_threshold: 0.3
 
 # Combined similarity threshold for matching new detections to existing objects.
 # sim = spatial_overlap_ratio + clip_cosine_similarity. Must exceed this to match.
-sim_threshold: 1.2
+sim_threshold: 1.05
+
+# Enforce one-to-one local association so the same map object cannot absorb
+# multiple observations from the same frame.
+local_one_to_one_matching: true
 
 # Tracking specific settings
 # Centroid distance threshold (in metres) used for temporal tracking association.
-tracking_centroid_dist: 0.01
+tracking_centroid_dist: 0.02
 # Centroid distance threshold (in metres) used for map cleanup (merge_local_map).
 merging_centroid_dist: 0.05
 # Multiplier for downsample_voxel_size to determine the FAISS search radius.
 # This radius is used for 3D point cloud overlap calculation.
-faiss_radius_factor: 2.0
+faiss_radius_factor: 3.0
 # Maximum distance (in metres) from the camera to accept a new detection.
 # Objects beyond this distance are discarded early to save computation and avoid depth noise.
 max_detection_distance: 1.0
@@ -298,6 +334,9 @@ object_matching:
 object_tracking:
   # Minimum similarity required to update an existing global object with a new observation
   max_similarity: 0.8
+  # Reject local matches between detections with extremely different bbox volumes
+  # unless they also have meaningful spatial overlap.
+  max_bbox_volume_ratio: 4.0
 
 # On-relation check thresholds (spatial "object A is on top of object B" detection)
 on_relation:
@@ -324,6 +363,7 @@ time_threshold: 0.5
 pose_threshold: 0.1
 # Minimum rotation (in degrees) between consecutive keyframes
 rotation_threshold: 3
+
 
 
 # -------------------------------------------------------
@@ -354,6 +394,9 @@ downsample_interval: 3
 # active window, it is split into two separate objects.
 # Example: A "couch" with a "pillow" on it may oscillate between labels.
 max_common_th: 6
+# Disable local split for tabletop/offline rosbag mapping. Instance continuity is
+# handled by one-to-one tracking and end-process dedupe instead.
+enable_local_split: false
 # Maximum number of keyframes an unstable object can remain in PENDING status
 # (not being detected) before it is eliminated from the local map.
 # Also controls how long a STABLE object waits in WAITING status before
@@ -376,6 +419,9 @@ stable_num: 3
 # If True, global objects are never updated with new observations (frozen map).
 # Useful for evaluation or when the global map is preloaded and should not change.
 no_update: False
+# If False, keep all promoted objects in the local map until end_process and
+# update the global map only once at the end of the rosbag/offline run.
+promote_global_during_run: false
 
 
 # -------------------------------------------------------
@@ -425,7 +471,7 @@ run_local_mapping_only: False
 # into a single object during end_process, similar to ConceptGraphs and HOV-SG.
 # This fixes duplicate objects that the real-time tracker failed to associate
 # (e.g. same chair seen from two very different angles).
-merge_local_map: True
+merge_local_map: False
 # Minimum point cloud overlap ratio (0.0 to 1.0) required to merge two objects.
 # Lower values merge more aggressively (more duplicates removed but risk merging
 # distinct nearby objects). Higher values are conservative (only near-identical clouds).
@@ -461,6 +507,20 @@ save_layout: True
 layout_translation_threshold: 0.3
 # Minimum rotation (in degrees) between consecutive layout keyframes
 layout_rotation_threshold: 10.0
+
+# -------------------------------------------------------
+# SUPPORT SURFACE FILTER
+# -------------------------------------------------------
+# Filters large flat masks that correspond to the table/support plane or
+# regions mixing table + objects. These detections are marked as non-trackable
+# and are excluded from object tracking.
+support_surface_filter:
+  enabled: true
+  max_image_area_ratio: 0.20
+  max_z_extent: 0.03
+  min_xy_extent: 0.15
+  max_plane_distance: 0.02
+  min_plane_ratio: 0.70
 
 # ============================================================
 # PRELOADING CONFIG

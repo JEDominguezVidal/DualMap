@@ -37,7 +37,13 @@ class RunnerROSBase:
         self.max_pose_rgb_dt = float(getattr(cfg, "max_pose_rgb_dt", 0.03))
         self.tf_lookup_timeout = float(getattr(cfg, "tf_lookup_timeout", 0.10))
         self.drop_unsynced_frames = bool(getattr(cfg, "drop_unsynced_frames", True))
+        self.wait_for_first_valid_tf = bool(
+            getattr(cfg, "wait_for_first_valid_tf", True)
+        )
+        self.tf_runtime_queue_size = int(getattr(cfg, "tf_runtime_queue_size", 50))
+        self.tf_warmup_queue_size = int(getattr(cfg, "tf_warmup_queue_size", 512))
         self.dropped_frame_count = 0
+        self.has_valid_tf = False
 
     def load_intrinsics(self, dataset_cfg):
         """Load camera intrinsics from config file."""
@@ -175,6 +181,16 @@ class RunnerROSBase:
         if parent_frame or child_frame:
             return f"{parent_frame or '?'}->{child_frame or '?'}"
         return default
+
+    def mark_valid_tf(self, pose_frames: str) -> None:
+        """Mark TF mode as ready after the first successful lookup."""
+        if self.has_valid_tf:
+            return
+        self.has_valid_tf = True
+        self.logger.warning(
+            "[Main] First valid TF received. TF warm-up finished for %s.",
+            pose_frames,
+        )
 
     def log_frame_sync(
         self,
@@ -380,9 +396,28 @@ class RunnerROSBase:
         self.synced_data_queue.append(data_input)
         return data_input
 
+    def mapping_inputs_ready(self):
+        """Return whether enough state is available to process a keyframe."""
+        if self.intrinsics is None:
+            return False, "waiting_for_intrinsics"
+
+        if (
+            getattr(self, "use_tf_mode", False)
+            and self.wait_for_first_valid_tf
+            and not self.has_valid_tf
+        ):
+            return False, "waiting_for_first_valid_tf"
+
+        return True, "ready"
+
     def run_once(self, current_time_fn):
         """Check and process a keyframe if data is ready."""
         if not self.synced_data_queue:
+            return
+
+        ready, reason = self.mapping_inputs_ready()
+        if not ready:
+            self.logger.info("[Main] Delaying keyframe processing: %s", reason)
             return
 
         data_input = self.synced_data_queue[-1]
@@ -403,10 +438,16 @@ class RunnerROSBase:
             return
 
         data_input.idx = self.dualmap.get_keyframe_idx()
+        self.logger.info(
+            "[Main] Accepted keyframe %d by %s",
+            data_input.idx,
+            getattr(self.dualmap, "last_keyframe_reason", "unknown"),
+        )
 
         self.logger.info(
             "[Main] ============================================================"
         )
+        process_start_time = time.perf_counter()
         with timing_context("Time Per Frame", self.dualmap):
             if self.cfg.use_parallel:
                 self.dualmap.parallel_process(data_input)
@@ -414,5 +455,5 @@ class RunnerROSBase:
                 self.dualmap.sequential_process(data_input)
 
         self.logger.info(
-            f"[Main] Processing keyframe {data_input.idx} took {time.time() - data_input.time_stamp:.2f} seconds."
+            f"[Main] Processing keyframe {data_input.idx} took {time.perf_counter() - process_start_time:.2f} seconds."
         )

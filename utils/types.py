@@ -16,6 +16,12 @@ logger = logging.getLogger(__name__)
 class DataInput:
     idx: int = 0
     time_stamp: float = 0.0
+    rgb_timestamp: float = 0.0
+    depth_timestamp: float = 0.0
+    pose_timestamp: float = 0.0
+    rgb_depth_dt: float = 0.0
+    pose_rgb_dt: float = 0.0
+    pose_mode: str = "unknown"
     color: np.ndarray = field(
         default_factory=lambda: np.empty((0, 0, 3), dtype=np.uint8)
     )
@@ -31,6 +37,12 @@ class DataInput:
     def clear(self) -> None:
         self.idx = 0
         self.time_stamp = 0.0
+        self.rgb_timestamp = 0.0
+        self.depth_timestamp = 0.0
+        self.pose_timestamp = 0.0
+        self.rgb_depth_dt = 0.0
+        self.pose_rgb_dt = 0.0
+        self.pose_mode = "unknown"
         self.color = np.empty((0, 0, 3), dtype=np.uint8)
         self.depth = np.empty((0, 0), dtype=np.float32)
         self.color_name = ""
@@ -65,6 +77,7 @@ class LocalObservation(Observation):
     semantic_confidence: float = 0.0
     distance: float = 0.0
     label_source: str = "unknown"
+    non_trackable: bool = False
 
     is_low_mobility: bool = False
 

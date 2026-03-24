@@ -32,6 +32,10 @@ max_pose_rgb_dt: 0.03
 # Maximum wall-clock time to wait for TF to become available for a buffered RGB-D frame.
 tf_lookup_timeout: 0.10
 
+# Hold the pipeline in warm-up until the first valid TF is available.
+# Frames seen before that are ignored but not counted as dropped.
+wait_for_first_valid_tf: true
+
 # Drop RGB-D(-pose) frames that exceed the validation thresholds above.
 drop_unsynced_frames: true
 

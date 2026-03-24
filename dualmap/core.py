@@ -59,6 +59,7 @@ class Dualmap:
         self.keyframe_counter = 0
         self.last_keyframe_time = None
         self.last_keyframe_pose = None
+        self.last_keyframe_reason = "initial"
         self.time_threshold = cfg.time_threshold
         self.pose_threshold = cfg.pose_threshold
         self.rotation_threshold = cfg.rotation_threshold
@@ -176,8 +177,7 @@ class Dualmap:
         Check if the current frame should be selected as a keyframe based on
         time interval, pose difference (translation), and rotation difference.
         """
-        is_keyframe = False
-        # Translation check
+        reason = None
         if self.last_keyframe_pose is not None:
             translation_diff = np.linalg.norm(
                 curr_pose[:3, 3] - self.last_keyframe_pose[:3, 3]
@@ -185,42 +185,44 @@ class Dualmap:
             if translation_diff >= self.pose_threshold:
                 self.last_keyframe_time = time_stamp
                 self.last_keyframe_pose = curr_pose
-                logger.info(
-                    "[Core][CheckKeyframe] New keyframe detected by translation"
-                )
-                is_keyframe = True
+                self.last_keyframe_reason = f"translation:{translation_diff:.4f}m"
+                reason = "translation"
 
-            # Rotation check
             curr_rotation = R.from_matrix(curr_pose[:3, :3])
             last_rotation = R.from_matrix(self.last_keyframe_pose[:3, :3])
             rotation_diff = curr_rotation.inv() * last_rotation
             angle_diff = rotation_diff.magnitude() * (180 / np.pi)
 
-            if angle_diff >= self.rotation_threshold:
+            if reason is None and angle_diff >= self.rotation_threshold:
                 self.last_keyframe_time = time_stamp
                 self.last_keyframe_pose = curr_pose
-                logger.info("[Core][CheckKeyframe] New keyframe detected by rotation")
-                is_keyframe = True
+                self.last_keyframe_reason = f"rotation:{angle_diff:.2f}deg"
+                reason = "rotation"
 
         # Time check
-        if (
+        if reason is None and (
             self.last_keyframe_time is None
             or abs(time_stamp - self.last_keyframe_time) >= self.time_threshold
         ):
+            time_since_last_keyframe = (
+                0.0
+                if self.last_keyframe_time is None
+                else abs(time_stamp - self.last_keyframe_time)
+            )
             self.last_keyframe_time = time_stamp
             self.last_keyframe_pose = curr_pose
-            logger.info("[Core][CheckKeyframe] New keyframe detected by time")
-            is_keyframe = True
+            self.last_keyframe_reason = f"time:{time_since_last_keyframe:.3f}s"
+            reason = "time"
 
-        if is_keyframe:
+        if reason is not None:
             self.keyframe_counter += 1
             logger.info(
-                f"[Core][CheckKeyframe] Current frame is keyframe: {self.keyframe_counter}"
+                "[Core][CheckKeyframe] Current frame is keyframe: %d (%s)",
+                self.keyframe_counter,
+                self.last_keyframe_reason,
             )
             return True
-        else:
-            # logger.info("Not a new keyframe, abandon")
-            return False
+        return False
 
     def get_total_memory_by_keyword(self, keyword="applications"):
         total_rss = 0
@@ -284,7 +286,8 @@ class Dualmap:
         with timing_context("Global Mapping", self):
             global_obs_list = self.local_map_manager.get_global_observations()
             self.local_map_manager.clear_global_observations()
-            self.global_map_manager.process_observations(global_obs_list)
+            if global_obs_list:
+                self.global_map_manager.process_observations(global_obs_list)
 
     def parallel_process(self, data_input: DataInput):
         """
@@ -537,7 +540,8 @@ class Dualmap:
                     self.local_map_manager.clear_global_observations()
 
                     # Global Mapping
-                    self.global_map_manager.process_observations(global_obs_list)
+                    if global_obs_list:
+                        self.global_map_manager.process_observations(global_obs_list)
 
                 # Get memory usage statistics of local and global maps
                 # mem_stats = get_map_memory_usage(self.local_map_manager.local_map,
@@ -610,6 +614,11 @@ class Dualmap:
         end_frame_id = self.curr_frame_id
 
         self.stop_threading()
+        logger.info(
+            "[Core][EndProcess] Starting end process with local_map_size=%d global_map_size=%d",
+            len(self.local_map_manager.local_map),
+            len(self.global_map_manager.global_map),
+        )
 
         # end duration
         end_range = self.cfg.active_window_size + self.cfg.max_pending_count + 1
@@ -636,7 +645,8 @@ class Dualmap:
             # global process
             global_obs_list = self.local_map_manager.get_global_observations()
             self.local_map_manager.clear_global_observations()
-            self.global_map_manager.process_observations(global_obs_list)
+            if global_obs_list:
+                self.global_map_manager.process_observations(global_obs_list)
             global_map_obj_num = len(self.global_map_manager.global_map)
             logger.info("[Core][EndProcess] Global Objects num: %d", global_map_obj_num)
 
@@ -675,6 +685,12 @@ class Dualmap:
             print_timing_results("Detector", self.detector.timing_results)
             detector_time_path = self.cfg.map_save_path + "/../detector_time.csv"
             save_timing_results(self.detector.timing_results, detector_time_path)
+
+        logger.info(
+            "[Core][EndProcess] Finished with local_map_size=%d global_map_size=%d",
+            len(self.local_map_manager.local_map),
+            len(self.global_map_manager.global_map),
+        )
 
     def monitor_config_file(self, config_file_path: str):
         """

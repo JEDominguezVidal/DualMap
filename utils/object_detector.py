@@ -99,13 +99,17 @@ class Detector:
             bg_classes=cfg.yolo.bg_classes,
             skip_bg=cfg.yolo.skip_bg,
         )
+        self.unknown_class_id = self.obj_classes.get_unknown_class_id()
+        self.cfg = cfg
+        try:
+            self.cfg.unknown_class_id = self.unknown_class_id
+        except Exception:
+            pass
 
         # get detection paths
         self.detection_path = Path(cfg.detection_path)
         self.detection_path.mkdir(parents=True, exist_ok=True)
 
-        # Configs
-        self.cfg = cfg
         # Detection results
         # NOTICE: Detection results are stored in Batch, it is not separated by objects
         self.curr_results = {}
@@ -118,15 +122,22 @@ class Detector:
         # masked points and colors
         self.masked_points = []
         self.masked_colors = []
+        self.mask_processing_meta = []
         # Observations, a list for each obj observation
         self.curr_observations = []
+        self.last_detection_stats = {
+            "yolo_base_detections": 0,
+            "fastsam_extra_accepted": 0,
+            "support_surface_discarded": 0,
+            "ambiguous_cluster_discarded": 0,
+        }
 
         # visualizer
         self.visualizer = ReRunVisualizer()
         self.annotated_image = None
+        self.annotated_image_support_surface = None
 
         # Variables for FastSAM
-        self.unknown_class_id = self.obj_classes.get_unknown_class_id()
         if self.unknown_class_id is None and (
             cfg.use_fastsam or cfg.clip_unknown_relabel.enabled
         ):
@@ -137,6 +148,7 @@ class Detector:
         self.annotated_image_fs = None
         self.annotated_image_fs_after = None
         self.annotated_image_clip_relabel = None
+        self.fastsam_detections = {}
         self.relabel_candidate_ids = np.empty(0, dtype=np.int64)
 
         # Layout Pointcloud
@@ -278,6 +290,13 @@ class Detector:
     def update_state(self) -> None:
         self.curr_results = {}
         self.curr_observations = []
+        self.mask_processing_meta = []
+        self.last_detection_stats = {
+            "yolo_base_detections": 0,
+            "fastsam_extra_accepted": 0,
+            "support_surface_discarded": 0,
+            "ambiguous_cluster_discarded": 0,
+        }
         # Keep the latest debug images alive until ROS publishes them.
         # self.prev_data = self.curr_data.copy()
         # self.curr_data.clear()
@@ -577,8 +596,12 @@ class Detector:
         # if detection is empty, return
         if len(confidence) == 0:
             logger.warning("[Detector] No detections found in curr frame.")
-            # set current results as empty dict
-            self.curr_results = {}
+            self.curr_detections = sv.Detections(
+                xyxy=np.empty((0, 4), dtype=np.float32),
+                confidence=np.empty((0,), dtype=np.float32),
+                class_id=np.empty((0,), dtype=np.int64),
+                mask=np.empty((0,) + color.shape[:2], dtype=bool),
+            )
             return
         with timing_context("Segmentation", self):
             sam_out = self.sam.predict(color, bboxes=xyxy, verbose=False)
@@ -596,8 +619,26 @@ class Detector:
         self.curr_detections = curr_detections
 
     def filter_fs_detections_by_curr(
-        self, fs_detections, curr_detections, iou_threshold=0.5, overlap_threshold=0.6
+        self,
+        fs_detections,
+        curr_detections,
+        iou_threshold=0.5,
+        overlap_threshold=0.6,
+        coarse_mask_ratio=2.5,
     ):
+        fastsam_mode = self.get_fastsam_mode()
+        if fastsam_mode == "off":
+            return self.slice_detections(
+                fs_detections,
+                np.zeros(len(fs_detections.xyxy), dtype=bool),
+            )
+
+        if fastsam_mode == "uncovered_only":
+            return self.filter_fs_detections_uncovered_only(
+                fs_detections,
+                curr_detections,
+            )
+
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         # Convert numpy arrays to torch tensors and move to GPU
@@ -642,6 +683,12 @@ class Detector:
         # Initialize keep mask, default is to keep all fs_masks
         keep_mask = torch.ones(num_fs, dtype=torch.bool, device=device)
 
+        fs_box_area = (fs_xyxy[:, 2] - fs_xyxy[:, 0]) * (fs_xyxy[:, 3] - fs_xyxy[:, 1])
+        curr_box_area = (curr_detections.xyxy[:, 2] - curr_detections.xyxy[:, 0]) * (
+            curr_detections.xyxy[:, 3] - curr_detections.xyxy[:, 1]
+        )
+        curr_box_area = torch.tensor(curr_box_area, dtype=torch.float32, device=device)
+
         # Filter masks one by one
         for i in range(num_fs):
             # Check if current fs_mask overlaps with curr_mask
@@ -651,8 +698,21 @@ class Detector:
                 | (overlap_ratio_curr[i] > overlap_threshold)
             )
 
-            # If overlap exists, mark as not keep
-            if overlap.any():
+            if not overlap.any():
+                continue
+
+            overlap_indices = torch.where(overlap)[0]
+            coarse_overlap = False
+            for curr_idx in overlap_indices.tolist():
+                area_ratio = curr_box_area[curr_idx] / torch.clamp(fs_box_area[i], min=1.0)
+                if area_ratio > coarse_mask_ratio:
+                    coarse_overlap = True
+                    break
+
+            # Keep the finer FastSAM mask when the overlapping YOLO/SAM mask
+            # is much coarser. The final geometric filter will decide whether
+            # the mask corresponds to a valid object or a support surface.
+            if not coarse_overlap:
                 keep_mask[i] = False
 
         # Filter detections based on keep mask
@@ -664,6 +724,67 @@ class Detector:
         )
 
         return filtered_fs_detections
+
+    def is_rosbag_tf_mode(self) -> bool:
+        return getattr(self.cfg, "dataset_name", "") == "rosbag_tf"
+
+    def get_fastsam_mode(self) -> str:
+        configured_mode = getattr(self.cfg, "fastsam_mode", None)
+        if configured_mode is not None:
+            return str(configured_mode)
+        return "uncovered_only" if self.is_rosbag_tf_mode() else "full"
+
+    def should_clip_relabel_fastsam(self) -> bool:
+        configured_value = getattr(self.cfg, "clip_relabel_fastsam", None)
+        if configured_value is not None:
+            return bool(configured_value)
+        return not self.is_rosbag_tf_mode()
+
+    def filter_fs_detections_uncovered_only(self, fs_detections, curr_detections):
+        num_fs = len(fs_detections.xyxy)
+        if num_fs == 0:
+            return fs_detections
+
+        if curr_detections.mask is not None and len(curr_detections.mask) > 0:
+            covered_mask = np.any(curr_detections.mask, axis=0)
+            image_shape = curr_detections.mask.shape[1:]
+        else:
+            image_shape = fs_detections.mask.shape[1:]
+            covered_mask = np.zeros(image_shape, dtype=bool)
+
+        support_cfg = getattr(self.cfg, "support_surface_filter", None)
+        max_area_ratio = 0.20
+        if support_cfg is not None:
+            max_area_ratio = float(
+                getattr(support_cfg, "max_image_area_ratio", max_area_ratio)
+            )
+
+        min_mask_pixels = max(int(getattr(self.cfg, "small_mask_th", 20)), 20)
+        min_novel_pixels = max(min_mask_pixels * 2, 20)
+        min_novel_ratio = 0.30
+        keep_mask = np.zeros(num_fs, dtype=bool)
+
+        for det_idx in range(num_fs):
+            mask = np.asarray(fs_detections.mask[det_idx], dtype=bool)
+            mask_pixels = int(np.sum(mask))
+            if mask_pixels < min_mask_pixels:
+                continue
+
+            mask_area_ratio = mask_pixels / max(float(mask.size), 1.0)
+            if mask_area_ratio > max_area_ratio:
+                continue
+
+            novel_mask = np.logical_and(mask, np.logical_not(covered_mask))
+            novel_pixels = int(np.sum(novel_mask))
+            novel_ratio = novel_pixels / max(mask_pixels, 1)
+
+            if novel_pixels < min_novel_pixels or novel_ratio < min_novel_ratio:
+                continue
+
+            keep_mask[det_idx] = True
+            covered_mask = np.logical_or(covered_mask, mask)
+
+        return self.slice_detections(fs_detections, keep_mask)
 
     def add_extra_detections_from_fastsam(
         self, color, fastsam_detections, incoming_detections
@@ -680,11 +801,162 @@ class Detector:
             )
             self.annotated_image_fs_after = image_fs_after
 
+        accepted_count = len(fs_after_detections.xyxy)
+
         # merge_detctions
         merged_detctions = self.merge_detections(
             fs_after_detections, incoming_detections
         )
-        return merged_detctions
+        return merged_detctions, accepted_count
+
+    def slice_detections(self, detections: sv.Detections, keep_mask: np.ndarray):
+        """Return a sliced detections object using a boolean keep mask."""
+        keep_mask = np.asarray(keep_mask, dtype=bool)
+        return sv.Detections(
+            xyxy=np.array(detections.xyxy[keep_mask], dtype=np.float32),
+            confidence=np.array(detections.confidence[keep_mask], dtype=np.float32),
+            class_id=np.array(detections.class_id[keep_mask], dtype=np.int64),
+            mask=np.array(detections.mask[keep_mask], dtype=np.bool_),
+        )
+
+    def estimate_support_plane(self):
+        """Estimate the dominant plane in the current frame for support filtering."""
+        filter_cfg = getattr(self.cfg, "support_surface_filter", None)
+        if not filter_cfg or not getattr(filter_cfg, "enabled", False):
+            return None
+
+        frame_pcd = self.depth_to_point_cloud(sample_rate=16)
+        if len(frame_pcd.points) < 64:
+            return None
+
+        try:
+            plane_model, inliers = frame_pcd.segment_plane(
+                distance_threshold=filter_cfg.max_plane_distance,
+                ransac_n=3,
+                num_iterations=100,
+            )
+        except RuntimeError:
+            return None
+
+        if len(inliers) < 64:
+            return None
+
+        return np.asarray(plane_model, dtype=np.float32)
+
+    def build_support_surface_debug_image(
+        self,
+        color: np.ndarray,
+        detections: sv.Detections,
+        non_trackable_mask: np.ndarray,
+    ) -> np.ndarray:
+        support_indices = np.flatnonzero(non_trackable_mask)
+        if len(support_indices) == 0:
+            return color.copy()
+
+        support_detections = self.slice_detections(detections, non_trackable_mask)
+        annotated_image, _ = visualize_result_rgb(
+            color,
+            support_detections,
+            self.obj_classes.get_classes_arr(),
+        )
+        return annotated_image
+
+    def apply_support_surface_filter(
+        self,
+        *,
+        color: np.ndarray,
+        detections: sv.Detections,
+        image_feats: np.ndarray,
+        text_feats: np.ndarray,
+        semantic_confidence: np.ndarray,
+        label_source: np.ndarray,
+        relabel_top1_scores: np.ndarray,
+        relabel_top2_scores: np.ndarray,
+        relabel_top1_class_ids: np.ndarray,
+        relabel_top2_class_ids: np.ndarray,
+    ):
+        filter_cfg = getattr(self.cfg, "support_surface_filter", None)
+        num_detections = len(detections.xyxy)
+        non_trackable_mask = np.zeros(num_detections, dtype=bool)
+
+        if not filter_cfg or not getattr(filter_cfg, "enabled", False) or num_detections == 0:
+            self.annotated_image_support_surface = color.copy()
+            return (
+                detections,
+                image_feats,
+                text_feats,
+                semantic_confidence,
+                label_source,
+                relabel_top1_scores,
+                relabel_top2_scores,
+                relabel_top1_class_ids,
+                relabel_top2_class_ids,
+                non_trackable_mask,
+            )
+
+        plane_model = self.estimate_support_plane()
+        image_area = float(color.shape[0] * color.shape[1])
+
+        for det_idx in range(num_detections):
+            if det_idx >= len(self.masked_points) or self.masked_points[det_idx] is None:
+                continue
+
+            points = self.masked_points[det_idx]
+            if len(points) == 0:
+                continue
+
+            pcd = o3d.geometry.PointCloud()
+            pcd.points = o3d.utility.Vector3dVector(points)
+            pcd.transform(self.curr_data.pose)
+            bbox = safe_create_bbox(pcd)
+            extent = bbox.get_extent()
+            mask_area_ratio = float(np.sum(detections.mask[det_idx])) / max(image_area, 1.0)
+
+            flat_large_support = (
+                mask_area_ratio > filter_cfg.max_image_area_ratio
+                and extent[2] < filter_cfg.max_z_extent
+                and max(extent[0], extent[1]) > filter_cfg.min_xy_extent
+            )
+
+            plane_ratio = 0.0
+            if plane_model is not None:
+                plane_normal = plane_model[:3]
+                plane_norm = np.linalg.norm(plane_normal)
+                if plane_norm > 1e-8:
+                    world_points = np.asarray(pcd.points)
+                    distances = np.abs(world_points @ plane_normal + plane_model[3]) / plane_norm
+                    plane_ratio = float(
+                        np.mean(distances <= filter_cfg.max_plane_distance)
+                    )
+
+            support_surface = flat_large_support or (
+                plane_ratio >= filter_cfg.min_plane_ratio
+                and mask_area_ratio > filter_cfg.max_image_area_ratio
+            )
+            if support_surface:
+                non_trackable_mask[det_idx] = True
+
+        self.annotated_image_support_surface = self.build_support_surface_debug_image(
+            color=color,
+            detections=detections,
+            non_trackable_mask=non_trackable_mask,
+        )
+        self.last_detection_stats["support_surface_discarded"] = int(
+            np.sum(non_trackable_mask)
+        )
+
+        return (
+            detections,
+            image_feats,
+            text_feats,
+            semantic_confidence,
+            label_source,
+            relabel_top1_scores,
+            relabel_top2_scores,
+            relabel_top1_class_ids,
+            relabel_top2_class_ids,
+            non_trackable_mask,
+        )
 
     def build_relabel_candidate_ids(self):
         classes = self.obj_classes.get_classes_arr()
@@ -753,6 +1025,7 @@ class Detector:
 
         if (
             not relabel_cfg.enabled
+            or not self.should_clip_relabel_fastsam()
             or self.unknown_class_id is None
             or len(self.relabel_candidate_ids) == 0
         ):
@@ -845,6 +1118,8 @@ class Detector:
         label_source: np.ndarray,
         num_detections: int,
     ) -> None:
+        if not self.should_clip_relabel_fastsam():
+            return
         label_source_counter = Counter(label_source.tolist())
         logger.info(
             "[Detector][Relabel] detections=%d, fastsam_unknown=%d, fastsam_clip=%d, sources=%s",
@@ -886,6 +1161,13 @@ class Detector:
     def process_detections(self):
 
         color = self.curr_data.color.astype(np.uint8)
+        self.last_detection_stats = {
+            "yolo_base_detections": 0,
+            "fastsam_extra_accepted": 0,
+            "support_surface_discarded": 0,
+            "ambiguous_cluster_discarded": 0,
+        }
+        self.annotated_image_support_surface = color.copy()
 
         with timing_context("YOLO+Segmentation+FastSAM", self):
             # Run FastSAM
@@ -903,22 +1185,28 @@ class Detector:
                 fastsam_thread.join()
 
         with timing_context("Detection Filter", self):
-            self.filter.update_detections(self.curr_detections, color)
+            raw_detections = self.curr_detections
+            self.last_detection_stats["yolo_base_detections"] = len(raw_detections.xyxy)
+
+            if (
+                self.cfg.use_fastsam
+                and isinstance(self.fastsam_detections, sv.Detections)
+                and len(self.fastsam_detections.xyxy) > 0
+            ):
+                raw_detections, accepted_extra = self.add_extra_detections_from_fastsam(
+                    color, self.fastsam_detections, raw_detections
+                )
+                self.last_detection_stats["fastsam_extra_accepted"] = int(accepted_extra)
+
+            self.filter.update_detections(raw_detections, color)
             filtered_detections = self.filter.run_filter()
 
-        if self.filter.get_len() == 0:
+        if filtered_detections is None or self.filter.get_len() == 0:
             logger.warning(
                 "[Detector] No valid detections in curr frame after filtering."
             )
             self.curr_results = {}
             return
-
-        # add extra detections from FastSAM results
-        # if no detection from fastsam, just skip
-        if self.cfg.use_fastsam and self.fastsam_detections:
-            filtered_detections = self.add_extra_detections_from_fastsam(
-                color, self.fastsam_detections, filtered_detections
-            )
 
         with timing_context("CLIP+Create Object Pointcloud", self):
             cluster_thread = threading.Thread(
@@ -963,6 +1251,39 @@ class Detector:
             num_detections=len(class_id),
         )
 
+        (
+            filtered_detections,
+            image_feats,
+            text_feats,
+            semantic_confidence,
+            label_source,
+            relabel_top1_scores,
+            relabel_top2_scores,
+            relabel_top1_class_ids,
+            relabel_top2_class_ids,
+            non_trackable_mask,
+        ) = self.apply_support_surface_filter(
+            color=color,
+            detections=filtered_detections,
+            image_feats=image_feats,
+            text_feats=text_feats,
+            semantic_confidence=semantic_confidence,
+            label_source=label_source,
+            relabel_top1_scores=relabel_top1_scores,
+            relabel_top2_scores=relabel_top2_scores,
+            relabel_top1_class_ids=relabel_top1_class_ids,
+            relabel_top2_class_ids=relabel_top2_class_ids,
+        )
+
+        logger.info(
+            "[Detector][KeyframeStats] yolo_base=%d fastsam_extra_accepted=%d "
+            "support_surface_discarded=%d ambiguous_cluster_discarded=%d",
+            self.last_detection_stats["yolo_base_detections"],
+            self.last_detection_stats["fastsam_extra_accepted"],
+            self.last_detection_stats["support_surface_discarded"],
+            self.last_detection_stats["ambiguous_cluster_discarded"],
+        )
+
         results = {
             # SAM Info
             "xyxy": filtered_detections.xyxy,
@@ -974,6 +1295,7 @@ class Detector:
             "text_feats": text_feats,
             "semantic_confidence": semantic_confidence,
             "label_source": label_source,
+            "non_trackable": non_trackable_mask,
         }
 
         if self.cfg.clip_unknown_relabel.save_debug_scores:
@@ -1020,6 +1342,7 @@ class Detector:
             # Initialize results to the correct length for thread safety
             self.masked_points = [None] * N
             self.masked_colors = [None] * N
+            self.mask_processing_meta = [None] * N
 
             # Convert input data to tensors
             depth_tensor = (
@@ -1090,12 +1413,22 @@ class Detector:
                             downsampled_colors = valid_colors
 
                         # Refine points using clustering
-                        refined_points, refined_colors = refine_points_with_clustering(
+                        (
+                            refined_points,
+                            refined_colors,
+                            refine_meta,
+                        ) = refine_points_with_clustering(
                             downsampled_points,
                             downsampled_colors,
                             eps=self.cfg.dbscan_eps,
                             min_points=self.cfg.dbscan_min_points,
+                            return_metadata=True,
                         )
+
+                        self.mask_processing_meta[msg_idx] = refine_meta
+                        if refine_meta.get("ambiguous", False):
+                            self.last_detection_stats["ambiguous_cluster_discarded"] += 1
+                            continue
 
                         self.masked_points[msg_idx] = refined_points
                         self.masked_colors[msg_idx] = refined_colors
@@ -1245,6 +1578,17 @@ class Detector:
 
         cv2.imwrite(str(output_file_path), annotated_image)
 
+        if self.annotated_image_support_surface is not None:
+            support_output_path = (
+                self.detection_path
+                / "vis"
+                / (self.curr_data.color_name + "_support_surface.jpg")
+            )
+            cv2.imwrite(
+                str(support_output_path),
+                self.annotated_image_support_surface,
+            )
+
     def load_detection_results(
         self,
     ):
@@ -1310,6 +1654,9 @@ class Detector:
                 label_source[class_ids == self.unknown_class_id] = "fastsam_unknown"
             self.curr_results["label_source"] = label_source
 
+        if "non_trackable" not in self.curr_results:
+            self.curr_results["non_trackable"] = np.zeros(det_count, dtype=bool)
+
     def get_default_label_source(self) -> np.ndarray:
         class_ids = self.curr_results.get("class_id", np.empty(0, dtype=np.int64))
         label_source = np.full(len(class_ids), "yolo", dtype="<U32")
@@ -1334,6 +1681,9 @@ class Detector:
         for i in range(N):
 
             if i >= len(self.masked_points) or self.masked_points[i] is None:
+                continue
+
+            if self.curr_results.get("non_trackable", np.zeros(N, dtype=bool))[i]:
                 continue
 
             # Create pointcloud
@@ -1377,6 +1727,10 @@ class Detector:
                 "label_source",
                 self.get_default_label_source(),
             )[i]
+            curr_obs.non_trackable = self.curr_results.get(
+                "non_trackable",
+                np.zeros(N, dtype=bool),
+            )[i]
 
             if self.cfg.use_weighted_feature:
                 curr_obs.clip_ft = self.get_weighted_feature(idx=i)
@@ -1419,9 +1773,117 @@ class Detector:
             # Add observation to the list
             self.curr_observations.append(curr_obs)
 
+        self.curr_observations = self.dedupe_current_observations(
+            self.curr_observations
+        )
+
         logger.info(
             f"[Detector] Current observations num: {len(self.curr_observations)}"
         )
+
+    @staticmethod
+    def compute_clip_cosine_similarity(clip_a: np.ndarray, clip_b: np.ndarray) -> float:
+        clip_a = np.asarray(clip_a, dtype=np.float32)
+        clip_b = np.asarray(clip_b, dtype=np.float32)
+        if clip_a.size == 0 or clip_b.size == 0:
+            return 0.0
+        denom = np.linalg.norm(clip_a) * np.linalg.norm(clip_b)
+        if denom <= 1e-8:
+            return 0.0
+        return float(np.dot(clip_a, clip_b) / denom)
+
+    @staticmethod
+    def compute_bbox_xy_overlap_ratio(bbox_a, bbox_b) -> float:
+        min_a = np.asarray(bbox_a.get_min_bound(), dtype=np.float32)
+        max_a = np.asarray(bbox_a.get_max_bound(), dtype=np.float32)
+        min_b = np.asarray(bbox_b.get_min_bound(), dtype=np.float32)
+        max_b = np.asarray(bbox_b.get_max_bound(), dtype=np.float32)
+
+        inter_min = np.maximum(min_a[:2], min_b[:2])
+        inter_max = np.minimum(max_a[:2], max_b[:2])
+        inter_dims = np.maximum(inter_max - inter_min, 0.0)
+        inter_area = inter_dims[0] * inter_dims[1]
+
+        area_a = max((max_a[0] - min_a[0]) * (max_a[1] - min_a[1]), 1e-8)
+        area_b = max((max_b[0] - min_b[0]) * (max_b[1] - min_b[1]), 1e-8)
+        return float(max(inter_area / area_a, inter_area / area_b))
+
+    @staticmethod
+    def compute_bbox_3d_intersection(bbox_a, bbox_b) -> float:
+        min_a = np.asarray(bbox_a.get_min_bound(), dtype=np.float32)
+        max_a = np.asarray(bbox_a.get_max_bound(), dtype=np.float32)
+        min_b = np.asarray(bbox_b.get_min_bound(), dtype=np.float32)
+        max_b = np.asarray(bbox_b.get_max_bound(), dtype=np.float32)
+
+        inter_min = np.maximum(min_a, min_b)
+        inter_max = np.minimum(max_a, max_b)
+        inter_dims = np.maximum(inter_max - inter_min, 0.0)
+        return float(np.prod(inter_dims))
+
+    def should_dedupe_observation_pair(self, obs_a, obs_b) -> bool:
+        class_a_unknown = obs_a.class_id == self.unknown_class_id
+        class_b_unknown = obs_b.class_id == self.unknown_class_id
+
+        if not class_a_unknown and not class_b_unknown and obs_a.class_id != obs_b.class_id:
+            return False
+
+        clip_cos = self.compute_clip_cosine_similarity(obs_a.clip_ft, obs_b.clip_ft)
+        if clip_cos < 0.35:
+            return False
+
+        center_a = np.asarray(obs_a.bbox.get_center(), dtype=np.float32)
+        center_b = np.asarray(obs_b.bbox.get_center(), dtype=np.float32)
+        if np.linalg.norm(center_a[:2] - center_b[:2]) > 0.03:
+            return False
+
+        bbox_overlap = self.compute_bbox_xy_overlap_ratio(obs_a.bbox, obs_b.bbox)
+        if bbox_overlap >= 0.25:
+            return True
+
+        return self.compute_bbox_3d_intersection(obs_a.bbox, obs_b.bbox) > 0.0
+
+    def get_observation_keep_priority(self, obs) -> tuple:
+        is_known = int(obs.class_id != self.unknown_class_id)
+        is_yolo = int(getattr(obs, "label_source", "") == "yolo")
+        semantic_conf = float(getattr(obs, "semantic_confidence", 0.0))
+        point_count = len(getattr(obs.pcd, "points", []))
+        return (is_known, is_yolo, semantic_conf, point_count)
+
+    def dedupe_current_observations(self, observations: list) -> list:
+        if len(observations) <= 1:
+            return observations
+
+        sorted_indices = sorted(
+            range(len(observations)),
+            key=lambda idx: self.get_observation_keep_priority(observations[idx]),
+            reverse=True,
+        )
+        keep_indices = []
+        discarded = 0
+
+        for obs_idx in sorted_indices:
+            obs = observations[obs_idx]
+            is_duplicate = False
+            for kept_idx in keep_indices:
+                if self.should_dedupe_observation_pair(obs, observations[kept_idx]):
+                    is_duplicate = True
+                    discarded += 1
+                    break
+            if not is_duplicate:
+                keep_indices.append(obs_idx)
+
+        keep_indices = set(keep_indices)
+        deduped = [
+            obs for idx, obs in enumerate(observations) if idx in keep_indices
+        ]
+
+        if discarded > 0:
+            logger.info(
+                "[Detector] Intra-frame dedupe removed %d duplicated observations.",
+                discarded,
+            )
+
+        return deduped
 
     def get_weighted_feature(self, idx):
         image_feat = self.curr_results["image_feats"][idx]
@@ -1880,6 +2342,8 @@ class Filter:
         keep_larger: bool = True,
         small_mask_size: int = 200,
         skip_refinement: bool = False,
+        coarse_mask_ratio: float = 2.5,
+        unknown_overlap_containment: float = 0.9,
     ):
 
         self.confidence = None
@@ -1896,6 +2360,8 @@ class Filter:
         self.proximity_th = proximity_th
         self.keep_larger = keep_larger
         self.small_mask_size = small_mask_size
+        self.coarse_mask_ratio = coarse_mask_ratio
+        self.unknown_overlap_containment = unknown_overlap_containment
 
         self.device = "cpu"
 
@@ -1907,27 +2373,48 @@ class Filter:
             self.class_id = detections.class_id
             self.xyxy = detections.xyxy
             self.masks = detections.mask
-
-            self.masks_size = np.sum(self.masks, axis=(1, 2))
-
-            # Compute intersection every time the detections are updated
-            N = self.get_len()
-            # Convert masks to PyTorch tensors to accelerate computation
-            # Compute pairwise intersection using matrix operations
-            device = self.device
-            masks = torch.tensor(self.masks, dtype=torch.float32).to(device)
-            intersection = torch.matmul(masks.view(N, -1), masks.view(N, -1).T)
-
-            self.inter_np = intersection.cpu().numpy()
+            self.recompute_filter_metadata()
 
     def set_device(self, device):
         self.device = device
+
+    def recompute_filter_metadata(self):
+        """Keep mask sizes, bboxes, and pairwise intersections in sync."""
+        if self.confidence is None:
+            self.masks_size = np.zeros((0,), dtype=np.int64)
+            self.inter_np = np.zeros((0, 0), dtype=np.float32)
+            return
+
+        self.masks = np.asarray(self.masks, dtype=np.bool_)
+        N = self.get_len()
+        if N == 0:
+            self.masks_size = np.zeros((0,), dtype=np.int64)
+            self.inter_np = np.zeros((0, 0), dtype=np.float32)
+            return
+
+        if self.xyxy is None or len(self.xyxy) != N:
+            self.xyxy = np.zeros((N, 4), dtype=np.float32)
+        else:
+            self.xyxy = np.asarray(self.xyxy, dtype=np.float32)
+
+        self.masks_size = np.sum(self.masks, axis=(1, 2)).astype(np.int64)
+        for idx in range(N):
+            bbox = update_bbox(self.masks[idx])
+            if bbox is None:
+                self.xyxy[idx] = np.zeros((4,), dtype=np.float32)
+            else:
+                self.xyxy[idx] = np.asarray(bbox, dtype=np.float32)
+
+        device = self.device
+        masks = torch.tensor(self.masks, dtype=torch.float32).to(device)
+        intersection = torch.matmul(masks.view(N, -1), masks.view(N, -1).T)
+        self.inter_np = intersection.cpu().numpy()
 
     def run_filter(self):
         original_num = self.get_len()
         if self.confidence is None or original_num == 0:
             logger.warning("[Detector][Filter] No detections to filter.")
-            return
+            return None
 
         keep = self.filter_by_mask_size()
         self.set_detections(keep)
@@ -1940,6 +2427,9 @@ class Filter:
             self.set_detections(keep)
 
             self.overlap_check()
+
+            keep = self.filter_by_mask_size()
+            self.set_detections(keep)
 
         keep = self.filter_by_bg()
         self.set_detections(keep)
@@ -1982,7 +2472,7 @@ class Filter:
             self.masks[keep],
             self.masks_size[keep],
         )
-        self.inter_np = self.inter_np[keep][:, keep]
+        self.recompute_filter_metadata()
 
     def filter_by_iou(self):
         N = self.get_len()
@@ -1997,17 +2487,55 @@ class Filter:
         intersection = self.inter_np
         area = masks.reshape(N, -1).sum(axis=1)
         union = area[:, None] + area[None, :] - intersection
-        iou_matrix = intersection / union
+        iou_matrix = intersection / np.clip(union, 1e-7, None)
 
         # Initialize keep mask
         keep = np.ones(N, dtype=bool)
+        unknown_class_id = self.classes.get_unknown_class_id()
 
         # Apply IoU threshold and keep larger/smaller masks
         for i in range(N):
             if not keep[i]:
                 continue
             for j in range(i + 1, N):
+                if not keep[j]:
+                    continue
+                i_is_unknown = (
+                    unknown_class_id is not None
+                    and self.class_id[i] == unknown_class_id
+                )
+                j_is_unknown = (
+                    unknown_class_id is not None
+                    and self.class_id[j] == unknown_class_id
+                )
+                smaller_area = max(min(area[i], area[j]), 1.0)
+                containment = intersection[i, j] / smaller_area
+                if i_is_unknown and j_is_unknown and (
+                    containment >= self.unknown_overlap_containment
+                    or iou_matrix[i, j] > self.iou_th
+                ):
+                    if masks_size[i] > masks_size[j] or (
+                        masks_size[i] == masks_size[j]
+                        and self.confidence[i] >= self.confidence[j]
+                    ):
+                        keep[j] = False
+                    else:
+                        keep[i] = False
+                        break
+                    continue
                 if iou_matrix[i, j] > self.iou_th:
+                    size_ratio = max(
+                        masks_size[i] / max(masks_size[j], 1),
+                        masks_size[j] / max(masks_size[i], 1),
+                    )
+                    if (
+                        self.class_id[i] != self.class_id[j]
+                        and not (i_is_unknown or j_is_unknown)
+                    ):
+                        continue
+                    if size_ratio > self.coarse_mask_ratio and (i_is_unknown ^ j_is_unknown):
+                        continue
+
                     if ((masks_size[i] > masks_size[j]) and self.keep_larger) or (
                         (masks_size[i] < masks_size[j]) and not self.keep_larger
                     ):
@@ -2024,36 +2552,36 @@ class Filter:
     def filter_by_proximity(self):
         if self.color is None:
             logger.warning("[Detector][Filter] No color image is provided.")
-            return
+            return np.ones(self.get_len(), dtype=bool)
         N = self.get_len()
         if N == 0:
             return np.array([], dtype=bool)
-        # check if mask overlaps with each other
-        overlap = self.inter_np
-        overlap = overlap > 0
-        np.fill_diagonal(overlap, False)
-
-        N = self.get_len()
-        # Initialize keep mask
         keep = np.ones(N, dtype=bool)
-        masks_size = self.masks_size
+        unknown_class_id = self.classes.get_unknown_class_id()
 
-        # Get all the cropped images first to accelerate computation
-        cropped_images = []
-        cropped_masks = []
-        for i in range(N):
-            x1, y1, x2, y2 = map(int, self.xyxy[i])
-            cropped_image = self.color[y1:y2, x1:x2]
-            cropped_images.append(cropped_image)
-            cropped_mask = self.masks[i][y1:y2, x1:x2].astype(bool)
-            cropped_masks.append(cropped_mask)
+        while True:
+            self.recompute_filter_metadata()
+            overlap = self.inter_np > 0
+            np.fill_diagonal(overlap, False)
+            masks_size = self.masks_size
 
-        for i in range(N):
-            if not keep[i]:
-                continue
-            for j in range(i + 1, N):
-                # if overlapped, crop the images and check if they have the same distribution
-                if overlap[i, j]:
+            cropped_images = []
+            cropped_masks = []
+            for i in range(N):
+                x1, y1, x2, y2 = map(int, self.xyxy[i])
+                cropped_image = self.color[y1:y2, x1:x2]
+                cropped_images.append(cropped_image)
+                cropped_mask = self.masks[i][y1:y2, x1:x2].astype(bool)
+                cropped_masks.append(cropped_mask)
+
+            changed = False
+            for i in range(N):
+                if not keep[i]:
+                    continue
+                for j in range(i + 1, N):
+                    if not keep[j] or not overlap[i, j]:
+                        continue
+
                     from_same_dis = if_same_distribution(
                         cropped_images[i],
                         cropped_images[j],
@@ -2062,23 +2590,52 @@ class Filter:
                         self.proximity_th,
                     )
 
-                    if from_same_dis:
-                        class_i = self.classes.get_classes_arr()[self.class_id[i]]
-                        class_j = self.classes.get_classes_arr()[self.class_id[j]]
-                        if ((masks_size[i] > masks_size[j]) and self.keep_larger) or (
-                            (masks_size[i] < masks_size[j]) and not self.keep_larger
-                        ):
-                            keep[j] = False
-                            self.merge_detections(j, i)
-                            logger.info(
-                                f"[Detector][Filter] Merging {class_j} into {class_i}"
-                            )
-                        else:
-                            keep[i] = False
-                            self.merge_detections(i, j)
-                            logger.info(
-                                f"[Detector][Filter] Merging {class_i} into {class_j}"
-                            )
+                    if not from_same_dis:
+                        continue
+
+                    size_ratio = max(
+                        masks_size[i] / max(masks_size[j], 1),
+                        masks_size[j] / max(masks_size[i], 1),
+                    )
+                    i_is_unknown = (
+                        unknown_class_id is not None
+                        and self.class_id[i] == unknown_class_id
+                    )
+                    j_is_unknown = (
+                        unknown_class_id is not None
+                        and self.class_id[j] == unknown_class_id
+                    )
+                    if (
+                        self.class_id[i] != self.class_id[j]
+                        and not (i_is_unknown or j_is_unknown)
+                    ):
+                        continue
+                    if size_ratio > self.coarse_mask_ratio and (i_is_unknown ^ j_is_unknown):
+                        continue
+
+                    class_i = self.classes.get_classes_arr()[self.class_id[i]]
+                    class_j = self.classes.get_classes_arr()[self.class_id[j]]
+                    if ((masks_size[i] > masks_size[j]) and self.keep_larger) or (
+                        (masks_size[i] < masks_size[j]) and not self.keep_larger
+                    ):
+                        keep[j] = False
+                        self.merge_detections(j, i, recompute=True)
+                        logger.info(
+                            f"[Detector][Filter] Merging {class_j} into {class_i}"
+                        )
+                    else:
+                        keep[i] = False
+                        self.merge_detections(i, j, recompute=True)
+                        logger.info(
+                            f"[Detector][Filter] Merging {class_i} into {class_j}"
+                        )
+                    changed = True
+                    break
+                if changed:
+                    break
+
+            if not changed:
+                break
 
         logger.info(
             f"[Detector][Filter] Original number of detections: {N}, after proximity filter: {np.sum(keep)}"
@@ -2086,25 +2643,76 @@ class Filter:
         return keep
 
     def overlap_check(self):
-        N = self.get_len()
-        if N == 0:
-            return
-        masks_size = self.masks_size
+        unknown_class_id = self.classes.get_unknown_class_id()
 
-        # check if mask overlaps with each other
-        overlap = self.inter_np
-        overlap = overlap > 0
-        np.fill_diagonal(overlap, False)
+        while True:
+            self.recompute_filter_metadata()
+            N = self.get_len()
+            if N == 0:
+                return
 
-        for i in range(N):
-            for j in range(i + 1, N):
-                if overlap[i, j]:
-                    if masks_size[i] > masks_size[j]:
-                        self.masks[i] = self.masks[i] & (~self.masks[j])
-                        self.xyxy[i] = update_bbox(self.masks[i])
+            overlap = self.inter_np > 0
+            np.fill_diagonal(overlap, False)
+            overlap_pairs = np.argwhere(np.triu(overlap, k=1))
+            if len(overlap_pairs) == 0:
+                return
+
+            changed = False
+            for i, j in overlap_pairs:
+                area_i = int(self.masks_size[i])
+                area_j = int(self.masks_size[j])
+                inter = float(self.inter_np[i, j])
+                smaller_area = max(min(area_i, area_j), 1)
+                union = max(area_i + area_j - inter, 1.0)
+                containment = inter / smaller_area
+                iou = inter / union
+
+                i_is_unknown = (
+                    unknown_class_id is not None
+                    and self.class_id[i] == unknown_class_id
+                )
+                j_is_unknown = (
+                    unknown_class_id is not None
+                    and self.class_id[j] == unknown_class_id
+                )
+                if i_is_unknown and j_is_unknown and (
+                    containment >= self.unknown_overlap_containment or iou >= self.iou_th
+                ):
+                    if area_i > area_j or (
+                        area_i == area_j and self.confidence[i] >= self.confidence[j]
+                    ):
+                        drop_idx = j
                     else:
-                        self.masks[j] = self.masks[j] & (~self.masks[i])
-                        self.xyxy[j] = update_bbox(self.masks[j])
+                        drop_idx = i
+                    keep = np.ones(N, dtype=bool)
+                    keep[drop_idx] = False
+                    self.set_detections(keep)
+                    changed = True
+                    break
+
+                if area_i >= area_j:
+                    trim_idx, reference_idx = i, j
+                else:
+                    trim_idx, reference_idx = j, i
+
+                trimmed_mask = self.masks[trim_idx] & (~self.masks[reference_idx])
+                trimmed_bbox = update_bbox(trimmed_mask)
+                if (
+                    trimmed_bbox is None
+                    or int(np.sum(trimmed_mask)) < self.small_mask_size
+                ):
+                    keep = np.ones(N, dtype=bool)
+                    keep[trim_idx] = False
+                    self.set_detections(keep)
+                else:
+                    self.masks[trim_idx] = trimmed_mask
+                    self.xyxy[trim_idx] = np.asarray(trimmed_bbox, dtype=np.float32)
+                    self.recompute_filter_metadata()
+                changed = True
+                break
+
+            if not changed:
+                return
 
     def filter_by_bg(self):
         N = self.get_len()
@@ -2119,6 +2727,8 @@ class Filter:
         return keep
 
     def filter_by_mask_size(self):
+        if self.get_len() == 0:
+            return np.array([], dtype=bool)
         keep = self.masks_size >= self.small_mask_size
         for idx, is_keep in enumerate(keep):
             if not is_keep:
@@ -2128,24 +2738,36 @@ class Filter:
                 )
         return keep
 
-    def merge_detections(self, det, target):
+    def merge_detections(self, det, target, recompute=False):
         # merge det into the target detection
         self.masks[target] = np.logical_or(self.masks[target], self.masks[det])
-        x_i1, y_i1, x_i2, y_i2 = map(int, self.xyxy[target])
-        x_j1, y_j1, x_j2, y_j2 = map(int, self.xyxy[det])
-        y1 = min(y_i1, y_j1)
-        y2 = max(y_i2, y_j2)
-        x1 = min(x_i1, x_j1)
-        x2 = max(x_i2, x_j2)
-        self.xyxy[target, :] = x1, y1, x2, y2
+        bbox = update_bbox(self.masks[target])
+        if bbox is None:
+            self.xyxy[target, :] = np.zeros((4,), dtype=np.float32)
+        else:
+            self.xyxy[target, :] = np.asarray(bbox, dtype=np.float32)
+        if recompute:
+            self.recompute_filter_metadata()
 
 
 def update_bbox(mask):
     y, x = np.nonzero(mask)
+    if len(x) == 0 or len(y) == 0:
+        return None
     return np.min(x), np.min(y), np.max(x), np.max(y)
 
 
 def if_same_distribution(img1, img2, mask1, mask2, sim_threshold):
+    if (
+        img1.size == 0
+        or img2.size == 0
+        or mask1.size == 0
+        or mask2.size == 0
+        or not np.any(mask1)
+        or not np.any(mask2)
+    ):
+        return False
+
     # Separate the image into three channels
     b1, g1, r1 = cv2.split(img1)
     b2, g2, r2 = cv2.split(img2)
@@ -2163,12 +2785,12 @@ def if_same_distribution(img1, img2, mask1, mask2, sim_threshold):
     hist_r2, _ = np.histogram(r2, bins=num_batches, range=(0, 256))
 
     # Normalize histograms
-    hist_b1 = hist_b1 / np.linalg.norm(hist_b1)
-    hist_g1 = hist_g1 / np.linalg.norm(hist_g1)
-    hist_r1 = hist_r1 / np.linalg.norm(hist_r1)
-    hist_b2 = hist_b2 / np.linalg.norm(hist_b2)
-    hist_g2 = hist_g2 / np.linalg.norm(hist_g2)
-    hist_r2 = hist_r2 / np.linalg.norm(hist_r2)
+    hist_b1 = hist_b1 / max(np.linalg.norm(hist_b1), 1e-7)
+    hist_g1 = hist_g1 / max(np.linalg.norm(hist_g1), 1e-7)
+    hist_r1 = hist_r1 / max(np.linalg.norm(hist_r1), 1e-7)
+    hist_b2 = hist_b2 / max(np.linalg.norm(hist_b2), 1e-7)
+    hist_g2 = hist_g2 / max(np.linalg.norm(hist_g2), 1e-7)
+    hist_r2 = hist_r2 / max(np.linalg.norm(hist_r2), 1e-7)
 
     # Concatenate histograms
     hist1 = np.concatenate([hist_b1, hist_g1, hist_r1])

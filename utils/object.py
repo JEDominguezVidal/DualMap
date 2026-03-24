@@ -61,6 +61,10 @@ class BaseObject:
         # is navigation goal flag
         self.nav_goal = False
 
+        # Debug / diagnostics for geometry update decisions.
+        self.geometry_update_stats = Counter()
+        self.last_geometry_update_mode = "init"
+
     def __getstate__(self):
         # Prepare the state dictionary for serialization
         state = {
@@ -98,6 +102,8 @@ class BaseObject:
         self.observations: List[str] = []
 
         self.save_path = self._initialize_save_path()
+        self.geometry_update_stats = Counter()
+        self.last_geometry_update_mode = "loaded"
 
     @classmethod
     def initialize_config(cls, config: DictConfig):
@@ -168,9 +174,16 @@ class BaseObject:
         # This function is to avoid the warning caused by o3d.geometry.voxel_down_sample
         # TODO: Color is not right
 
+        if pcd is None or len(pcd.points) == 0:
+            return o3d.geometry.PointCloud()
+
         # Get point cloud's points
         points_arr = np.asarray(pcd.points)
         colors_arr = np.asarray(pcd.colors)
+        if points_arr.ndim != 2 or points_arr.shape[1] != 3:
+            return o3d.geometry.PointCloud()
+        if colors_arr.ndim != 2 or colors_arr.shape[1] != 3:
+            colors_arr = np.zeros((len(points_arr), 3), dtype=np.float64)
 
         # Only retain X and Y coordinates
         points_2d = points_arr[:, :2]
@@ -202,6 +215,363 @@ class BaseObject:
         downsampled_pcd.colors = o3d.utility.Vector3dVector(downsampled_colors)
 
         return downsampled_pcd
+
+    @staticmethod
+    def copy_point_cloud(
+        pcd: Optional[o3d.geometry.PointCloud],
+    ) -> o3d.geometry.PointCloud:
+        if pcd is None:
+            return o3d.geometry.PointCloud()
+        return copy.deepcopy(pcd)
+
+    @staticmethod
+    def point_count(pcd: Optional[o3d.geometry.PointCloud]) -> int:
+        if pcd is None:
+            return 0
+        return len(pcd.points)
+
+    def safe_get_axis_aligned_bounding_box(
+        self, pcd: Optional[o3d.geometry.PointCloud]
+    ) -> o3d.geometry.AxisAlignedBoundingBox:
+        if pcd is None or len(pcd.points) == 0:
+            return o3d.geometry.AxisAlignedBoundingBox()
+        return pcd.get_axis_aligned_bounding_box()
+
+    def get_object_geometry_update_mode(self) -> str:
+        if self._cfg is None:
+            return "append"
+
+        configured_mode = getattr(self._cfg, "object_geometry_update_mode", None)
+        if configured_mode is None or str(configured_mode).lower() == "auto":
+            if getattr(self._cfg, "dataset_name", "") == "rosbag_tf":
+                return "hybrid"
+            return "append"
+
+        mode = str(configured_mode).lower()
+        if mode not in {"append", "replace", "hybrid"}:
+            logger.warning(
+                "[%s] Unknown object_geometry_update_mode='%s'. Falling back to append.",
+                self.__class__.__name__,
+                configured_mode,
+            )
+            return "append"
+        return mode
+
+    def get_geometry_update_thresholds(self) -> dict:
+        legacy_voxel_size = float(
+            getattr(
+                self._cfg,
+                "icp_voxel_size",
+                getattr(self._cfg, "downsample_voxel_size", 0.01),
+            )
+        )
+        legacy_distance_threshold = float(
+            getattr(
+                self._cfg,
+                "icp_distance_threshold",
+                max(legacy_voxel_size * 2.0, 0.02),
+            )
+        )
+        return {
+            "voxel_size": float(
+                getattr(self._cfg, "object_geometry_icp_voxel_size", legacy_voxel_size)
+            ),
+            "distance_threshold": float(
+                getattr(
+                    self._cfg,
+                    "object_geometry_icp_distance_threshold",
+                    legacy_distance_threshold,
+                )
+            ),
+            "min_points": int(
+                getattr(
+                    self._cfg,
+                    "object_geometry_icp_min_points",
+                    getattr(self._cfg, "icp_min_points", 20),
+                )
+            ),
+            "min_fitness": float(
+                getattr(
+                    self._cfg,
+                    "object_geometry_merge_min_fitness",
+                    max(float(getattr(self._cfg, "icp_fitness_threshold", 0.3)), 0.85),
+                )
+            ),
+            "max_rmse": float(
+                getattr(
+                    self._cfg,
+                    "object_geometry_merge_max_rmse",
+                    max(
+                        float(getattr(self._cfg, "downsample_voxel_size", 0.01)),
+                        legacy_distance_threshold * 0.5,
+                    ),
+                )
+            ),
+            "max_centroid_shift": float(
+                getattr(
+                    self._cfg,
+                    "object_geometry_merge_max_centroid_shift",
+                    max(
+                        float(getattr(self._cfg, "downsample_voxel_size", 0.01)) * 1.5,
+                        legacy_distance_threshold * 0.5,
+                    ),
+                )
+            ),
+        }
+
+    def merge_clip_feature(self, incoming_clip_ft, previous_count=None) -> None:
+        incoming_clip_ft = np.asarray(incoming_clip_ft, dtype=np.float32)
+        if incoming_clip_ft.size == 0:
+            return
+
+        if previous_count is None:
+            previous_count = max(self.observed_num - 1, 1)
+        previous_count = max(int(previous_count), 1)
+
+        if self.clip_ft.size == 0:
+            self.clip_ft = incoming_clip_ft.copy()
+        else:
+            self.clip_ft = (
+                (self.clip_ft * previous_count) + incoming_clip_ft
+            ) / float(previous_count + 1)
+
+        norm = np.linalg.norm(self.clip_ft)
+        if norm > 1e-8:
+            self.clip_ft = self.clip_ft / norm
+
+    def denoise_point_cloud_dbscan(
+        self, pcd: o3d.geometry.PointCloud
+    ) -> o3d.geometry.PointCloud:
+        if pcd is None or len(pcd.points) == 0:
+            return o3d.geometry.PointCloud()
+
+        eps = float(getattr(self._cfg, "dbscan_eps", 0.02))
+        min_points = int(getattr(self._cfg, "dbscan_min_points", 10))
+        try:
+            pcd_clusters = np.array(
+                pcd.cluster_dbscan(
+                    eps=eps,
+                    min_points=min_points,
+                )
+            )
+        except RuntimeError:
+            return pcd
+
+        obj_points = np.asarray(pcd.points)
+        obj_colors = np.asarray(pcd.colors)
+        counter = Counter(pcd_clusters.tolist())
+        if -1 in counter:
+            del counter[-1]
+
+        if not counter:
+            return pcd
+
+        most_common_label, _ = counter.most_common(1)[0]
+        largest_mask = pcd_clusters == most_common_label
+        largest_cluster_points = obj_points[largest_mask]
+        largest_cluster_colors = obj_colors[largest_mask]
+
+        if len(largest_cluster_points) < 5:
+            return pcd
+
+        largest_cluster_pcd = o3d.geometry.PointCloud()
+        largest_cluster_pcd.points = o3d.utility.Vector3dVector(largest_cluster_points)
+        largest_cluster_pcd.colors = o3d.utility.Vector3dVector(largest_cluster_colors)
+        return largest_cluster_pcd
+
+    def apply_legacy_append_geometry_update(
+        self,
+        current_pcd: o3d.geometry.PointCloud,
+        latest_pcd: o3d.geometry.PointCloud,
+    ) -> tuple[o3d.geometry.PointCloud, dict]:
+        current_copy = self.copy_point_cloud(current_pcd)
+        latest_copy = self.copy_point_cloud(latest_pcd)
+        metrics = {
+            "fitness": np.nan,
+            "rmse": np.nan,
+            "centroid_shift": np.nan,
+            "valid": True,
+            "reason": "append",
+        }
+
+        if (
+            getattr(self._cfg, "use_icp_alignment", False)
+            and self.point_count(current_copy) > 0
+            and self.point_count(latest_copy) > 0
+        ):
+            try:
+                source_down = latest_copy.voxel_down_sample(
+                    voxel_size=float(getattr(self._cfg, "icp_voxel_size", 0.05))
+                )
+                target_down = current_copy.voxel_down_sample(
+                    voxel_size=float(getattr(self._cfg, "icp_voxel_size", 0.05))
+                )
+                icp_min_points = int(getattr(self._cfg, "icp_min_points", 10))
+                if (
+                    self.point_count(source_down) > icp_min_points
+                    and self.point_count(target_down) > icp_min_points
+                ):
+                    reg_p2p = o3d.pipelines.registration.registration_icp(
+                        source_down,
+                        target_down,
+                        float(getattr(self._cfg, "icp_distance_threshold", 0.1)),
+                        np.eye(4),
+                        o3d.pipelines.registration.TransformationEstimationPointToPoint(),
+                        o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=50),
+                    )
+                    metrics["fitness"] = float(reg_p2p.fitness)
+                    metrics["rmse"] = float(reg_p2p.inlier_rmse)
+                    icp_fitness_threshold = float(
+                        getattr(self._cfg, "icp_fitness_threshold", 0.3)
+                    )
+                    if reg_p2p.fitness > icp_fitness_threshold:
+                        latest_copy.transform(reg_p2p.transformation)
+                        metrics["reason"] = "append_icp_aligned"
+                    else:
+                        metrics["reason"] = "append_icp_rejected"
+            except Exception as e:
+                logger.warning(f"[{self.__class__.__name__}] Legacy ICP alignment failed: {e}")
+                metrics["reason"] = "append_icp_failed"
+
+        merged_pcd = current_copy
+        merged_pcd += latest_copy
+        return merged_pcd, metrics
+
+    def build_geometry_update_candidate(
+        self,
+        current_pcd: o3d.geometry.PointCloud,
+        latest_pcd: o3d.geometry.PointCloud,
+    ) -> tuple[o3d.geometry.PointCloud, dict]:
+        latest_copy = self.copy_point_cloud(latest_pcd)
+        current_copy = self.copy_point_cloud(current_pcd)
+        params = self.get_geometry_update_thresholds()
+        metrics = {
+            "fitness": 0.0,
+            "rmse": float("inf"),
+            "centroid_shift": float("inf"),
+            "valid": False,
+            "reason": "insufficient_points",
+        }
+
+        if self.point_count(current_copy) == 0 or self.point_count(latest_copy) == 0:
+            return latest_copy, metrics
+
+        source_down = current_copy.voxel_down_sample(params["voxel_size"])
+        target_down = latest_copy.voxel_down_sample(params["voxel_size"])
+        if (
+            self.point_count(source_down) < params["min_points"]
+            or self.point_count(target_down) < params["min_points"]
+        ):
+            return latest_copy, metrics
+
+        try:
+            reg_p2p = o3d.pipelines.registration.registration_icp(
+                source_down,
+                target_down,
+                params["distance_threshold"],
+                np.eye(4),
+                o3d.pipelines.registration.TransformationEstimationPointToPoint(),
+                o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=50),
+            )
+        except Exception as e:
+            logger.warning(
+                "[%s] Hybrid geometry ICP failed: %s",
+                self.__class__.__name__,
+                e,
+            )
+            metrics["reason"] = "icp_failed"
+            return latest_copy, metrics
+
+        aligned_current = self.copy_point_cloud(current_copy)
+        aligned_current.transform(reg_p2p.transformation)
+        current_center = np.asarray(
+            self.safe_get_axis_aligned_bounding_box(aligned_current).get_center(),
+            dtype=np.float32,
+        )
+        latest_center = np.asarray(
+            self.safe_get_axis_aligned_bounding_box(latest_copy).get_center(),
+            dtype=np.float32,
+        )
+        centroid_shift = float(np.linalg.norm(current_center - latest_center))
+
+        metrics.update(
+            {
+                "fitness": float(reg_p2p.fitness),
+                "rmse": float(reg_p2p.inlier_rmse),
+                "centroid_shift": centroid_shift,
+            }
+        )
+        metrics["valid"] = (
+            metrics["fitness"] >= params["min_fitness"]
+            and metrics["rmse"] <= params["max_rmse"]
+            and metrics["centroid_shift"] <= params["max_centroid_shift"]
+        )
+        metrics["reason"] = (
+            "accepted" if metrics["valid"] else "quality_gate_failed"
+        )
+
+        merged_pcd = aligned_current
+        merged_pcd += latest_copy
+        if self.point_count(merged_pcd) > 0:
+            merged_pcd = merged_pcd.voxel_down_sample(
+                voxel_size=float(getattr(self._cfg, "downsample_voxel_size", 0.01))
+            )
+
+        return merged_pcd, metrics
+
+    def apply_geometry_update(
+        self,
+        current_pcd: o3d.geometry.PointCloud,
+        latest_pcd: o3d.geometry.PointCloud,
+        *,
+        log_decision: bool = False,
+    ) -> tuple[o3d.geometry.PointCloud, str, dict]:
+        mode = self.get_object_geometry_update_mode()
+
+        if mode == "replace":
+            updated_pcd = self.copy_point_cloud(latest_pcd)
+            mode_used = "replaced"
+            metrics = {
+                "fitness": np.nan,
+                "rmse": np.nan,
+                "centroid_shift": 0.0,
+                "valid": True,
+                "reason": "replace",
+            }
+        elif mode == "hybrid":
+            merged_candidate, metrics = self.build_geometry_update_candidate(
+                current_pcd=current_pcd,
+                latest_pcd=latest_pcd,
+            )
+            if metrics["valid"]:
+                updated_pcd = merged_candidate
+                mode_used = "merged"
+            else:
+                updated_pcd = self.copy_point_cloud(latest_pcd)
+                mode_used = "replaced"
+        else:
+            updated_pcd, metrics = self.apply_legacy_append_geometry_update(
+                current_pcd=current_pcd,
+                latest_pcd=latest_pcd,
+            )
+            mode_used = "appended"
+
+        self.geometry_update_stats[mode_used] += 1
+        self.last_geometry_update_mode = mode_used
+
+        if log_decision and mode == "hybrid":
+            logger.info(
+                "[%s] geometry_update=%s uid=%s fitness=%.3f rmse=%.4f centroid_shift=%.4f reason=%s",
+                self.__class__.__name__,
+                mode_used,
+                self.uid,
+                float(metrics.get("fitness", np.nan)),
+                float(metrics.get("rmse", np.nan)),
+                float(metrics.get("centroid_shift", np.nan)),
+                metrics.get("reason", "unknown"),
+            )
+
+        return updated_pcd, mode_used, metrics
 
 
 class LocalObject(BaseObject):
@@ -256,6 +626,14 @@ class LocalObject(BaseObject):
     def set_curr_idx(cls, idx: int):
         cls._curr_idx = idx
 
+    def is_local_split_enabled(self) -> bool:
+        if self._cfg is None:
+            return True
+        configured_value = getattr(self._cfg, "enable_local_split", None)
+        if configured_value is not None:
+            return bool(configured_value)
+        return getattr(self._cfg, "dataset_name", "") != "rosbag_tf"
+
     def add_observation(self, observation: Observation) -> None:
         self.observations.append(observation)
         self.observed_num += 1
@@ -277,6 +655,36 @@ class LocalObject(BaseObject):
         self.split_class_id_one = None
         self.split_class_id_two = None
         self.spatial_stable_info = None
+
+    def resolve_class_id_from_observations(self, previous_class_id=None):
+        class_ids = [obs.class_id for obs in self.observations if obs.class_id is not None]
+        if not class_ids:
+            return previous_class_id
+
+        known_ids = [
+            class_id for class_id in class_ids if class_id != self.unknown_class_id
+        ]
+        if known_ids:
+            counts = Counter(known_ids)
+            max_count = max(counts.values())
+            candidates = [
+                class_id for class_id, count in counts.items() if count == max_count
+            ]
+            if previous_class_id in candidates and previous_class_id != self.unknown_class_id:
+                return previous_class_id
+            return sorted(candidates)[0]
+
+        if previous_class_id is not None and previous_class_id != self.unknown_class_id:
+            return previous_class_id
+
+        counts = Counter(class_ids)
+        max_count = max(counts.values())
+        candidates = [
+            class_id for class_id, count in counts.items() if count == max_count
+        ]
+        if previous_class_id in candidates and previous_class_id is not None:
+            return previous_class_id
+        return sorted(candidates)[0]
 
     # Baye: Update posterior probability
     def update_class_probs(
@@ -354,68 +762,39 @@ class LocalObject(BaseObject):
             return
 
         if self.observed_num == 1:
-            self.pcd = latest_obs.pcd
-            self.bbox = latest_obs.bbox
-            self.clip_ft = latest_obs.clip_ft
+            self.pcd = self.copy_point_cloud(latest_obs.pcd)
+            self.bbox = self.safe_get_axis_aligned_bounding_box(self.pcd)
+            self.clip_ft = np.asarray(latest_obs.clip_ft, dtype=np.float32).copy()
             self.class_id = latest_obs.class_id
             self.is_low_mobility = latest_obs.is_low_mobility
             return
 
         # Split dict update
-        self.update_split_info(latest_obs)
-        if self.should_split:
-            return
+        if self.is_local_split_enabled():
+            self.update_split_info(latest_obs)
+            if self.should_split:
+                return
 
-        # Get outside infomations
-        # Merge pcd
-        # Apply ICP alignment if enabled to prevent ghosting/multi-layer artifacts
-        if getattr(self._cfg, 'use_icp_alignment', False) and len(self.pcd.points) > 0 and len(latest_obs.pcd.points) > 0:
-            try:
-                # Downsample for faster and more robust ICP
-                source_down = latest_obs.pcd.voxel_down_sample(voxel_size=self._cfg.icp_voxel_size)
-                target_down = self.pcd.voxel_down_sample(voxel_size=self._cfg.icp_voxel_size)
-                
-                icp_min_points = getattr(self._cfg, 'icp_min_points', 10)
-                if len(source_down.points) > icp_min_points and len(target_down.points) > icp_min_points:
-                    reg_p2p = o3d.pipelines.registration.registration_icp(
-                        source_down, target_down, self._cfg.icp_distance_threshold, np.eye(4),
-                        o3d.pipelines.registration.TransformationEstimationPointToPoint(),
-                        o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=50)
-                    )
-                    
-                    # Apply transformation if alignment is reasonable
-                    icp_fitness_threshold = getattr(self._cfg, 'icp_fitness_threshold', 0.3)
-                    if reg_p2p.fitness > icp_fitness_threshold:
-                        latest_obs.pcd.transform(reg_p2p.transformation)
-            except Exception as e:
-                logger.warning(f"[LocalObject] ICP alignment failed: {e}")
-
-        # Simply add
-        self.pcd += latest_obs.pcd
+        self.pcd, _, _ = self.apply_geometry_update(
+            current_pcd=self.pcd,
+            latest_pcd=latest_obs.pcd,
+            log_decision=self.get_object_geometry_update_mode() == "hybrid",
+        )
 
         # Get new bbox
-        # self.bbox = self.pcd.get_oriented_bounding_box(robust=True)
-        self.bbox = self.pcd.get_axis_aligned_bounding_box()
+        self.bbox = self.safe_get_axis_aligned_bounding_box(self.pcd)
 
         # Merge clip_ft
-        self.clip_ft = (
-            (self.clip_ft * (self.observed_num - 1) + latest_obs.clip_ft)
-            * 1.0
-            / (self.observed_num)
+        self.merge_clip_feature(
+            latest_obs.clip_ft,
+            previous_count=max(self.observed_num - 1, 1),
         )
-        # Normalize the new clip_ft
-        norm = np.linalg.norm(self.clip_ft)
-        self.clip_ft = self.clip_ft / norm
 
         # Update spatial stable info list
         self.update_spatial_stable_info(latest_obs)
 
-        # Get major class id
-        # get class id list
-        class_ids = [obs.class_id for obs in self.observations]
-        obj_class_id_counter = Counter(class_ids)
-        most_common_class_id = obj_class_id_counter.most_common(1)[0][0]
-        self.class_id = most_common_class_id
+        previous_class_id = self.class_id
+        self.class_id = self.resolve_class_id_from_observations(previous_class_id)
 
         # Bayesian update
         self.update_class_probs()
@@ -447,6 +826,13 @@ class LocalObject(BaseObject):
                 self.major_plane_info = None
 
     def update_split_info(self, latest_obs: Observation) -> None:
+        if not self.is_local_split_enabled():
+            self.should_split = False
+            self.max_common = 0
+            self.split_class_id_one = 0
+            self.split_class_id_two = 0
+            return
+
         # https://www.yuque.com/u21262689/fxzc7g/fmfk1gkv6fbemlus?singleDoc#
         # Boundary condition check
         if latest_obs is None:
@@ -553,29 +939,61 @@ class LocalObject(BaseObject):
         # duplicate objects into a single new LocalObject.
         # IMPORTANT: This must reconstruct ALL fields that __getstate__ serialises,
         # including pcd_2d and bbox_2d, which are required for correct deserialisation.
-        counter = 0
-        for obs in self.observations:
-            counter += 1
-            if counter == 1:
-                self.pcd = obs.pcd
-                self.clip_ft = obs.clip_ft
+        if self.observed_num == 0:
+            logger.error("[LocalObject] No observations available for reconstruction.")
+            return
+
+        self.pcd = o3d.geometry.PointCloud()
+        self.bbox = o3d.geometry.AxisAlignedBoundingBox()
+        self.clip_ft = np.empty(0, dtype=np.float32)
+        self.class_id = None
+        self.is_low_mobility = False
+        self.major_plane_info = None
+        self.geometry_update_stats = Counter()
+        self.last_geometry_update_mode = "rebuild"
+
+        if hasattr(self, "num_classes"):
+            self.class_probs = np.ones(self.num_classes) / self.num_classes
+            self.class_probs_history = []
+            self.max_prob = 0.0
+            self.entropy = 0.0
+            self.change_rate = 0.0
+
+        if hasattr(self, "pcd_2d"):
+            self.pcd_2d = o3d.geometry.PointCloud()
+            self.bbox_2d = o3d.geometry.AxisAlignedBoundingBox()
+
+        for obs_idx, obs in enumerate(self.observations):
+            if obs_idx == 0:
+                self.pcd = self.copy_point_cloud(obs.pcd)
+                self.bbox = self.safe_get_axis_aligned_bounding_box(self.pcd)
+                self.clip_ft = np.asarray(obs.clip_ft, dtype=np.float32).copy()
+                self.class_id = obs.class_id
+                self.is_low_mobility = obs.is_low_mobility
                 continue
-            self.pcd += obs.pcd
-            self.clip_ft += obs.clip_ft
 
-        # downsample pcd
-        self.pcd = self.pcd.voxel_down_sample(
-            voxel_size=self._cfg.downsample_voxel_size
-        )
-        # Group to majority
-        from utils.pcd_utils import init_pcd_denoise_dbscan
+            self.pcd, _, _ = self.apply_geometry_update(
+                current_pcd=self.pcd,
+                latest_pcd=obs.pcd,
+                log_decision=False,
+            )
+            self.bbox = self.safe_get_axis_aligned_bounding_box(self.pcd)
+            self.merge_clip_feature(obs.clip_ft, previous_count=obs_idx)
 
-        self.pcd = init_pcd_denoise_dbscan(
-            self.pcd, self._cfg.dbscan_eps, self._cfg.dbscan_min_points
-        )
+            if hasattr(self, "pcd_2d") and hasattr(obs, "pcd_2d") and len(obs.pcd_2d.points) > 0:
+                if len(self.pcd_2d.points) == 0:
+                    self.pcd_2d = self.copy_point_cloud(obs.pcd_2d)
+                else:
+                    self.pcd_2d += self.copy_point_cloud(obs.pcd_2d)
 
-        # self.bbox = self.pcd.get_oriented_bounding_box(robust=True)
-        self.bbox = self.pcd.get_axis_aligned_bounding_box()
+        if len(self.pcd.points) > 0:
+            self.pcd = self.pcd.voxel_down_sample(
+                voxel_size=self._cfg.downsample_voxel_size
+            )
+        if len(self.pcd.points) > 0:
+            self.pcd = self.denoise_point_cloud_dbscan(self.pcd)
+
+        self.bbox = self.safe_get_axis_aligned_bounding_box(self.pcd)
 
         # Rebuild pcd_2d from observations.
         # pcd_2d is the 2D projection point cloud used by GlobalObject for
@@ -597,18 +1015,7 @@ class LocalObject(BaseObject):
                 )
                 self.bbox_2d = self.pcd_2d.get_axis_aligned_bounding_box()
 
-        # norm feat
-        self.clip_ft = (self.clip_ft) * 1.0 / (self.observed_num)
-        # Normalize the new clip_ft
-        norm = np.linalg.norm(self.clip_ft)
-        self.clip_ft = self.clip_ft / norm
-
-        # Get major class id
-        # get class id list
-        class_ids = [obs.class_id for obs in self.observations]
-        obj_class_id_counter = Counter(class_ids)
-        most_common_class_id = obj_class_id_counter.most_common(1)[0][0]
-        self.class_id = most_common_class_id
+        self.class_id = self.resolve_class_id_from_observations(self.class_id)
 
         # Get low mobility info
         # get low mobility info list
@@ -620,7 +1027,7 @@ class LocalObject(BaseObject):
         self.is_low_mobility = most_common_lm
 
         # get major plane info
-        if self.is_low_mobility:
+        if self.is_low_mobility and len(self.pcd.points) > 0:
             self.major_plane_info = self.find_major_plane_info()
 
     def update_spatial_stable_info(self, latest_obs: Observation) -> None:
@@ -803,6 +1210,10 @@ class GlobalObject(BaseObject):
         self.related_bbox = []
         self.related_color = []
 
+        self.class_observation_counts = {}
+        self.known_observation_count = 0
+        self.unknown_observation_count = 0
+
         # If provide the LocalObject, then initialize the GlobalObject from it
         if observation is not None:
             self.init_from_global_obs(observation)
@@ -829,6 +1240,9 @@ class GlobalObject(BaseObject):
 
         # Serialize related_color (class IDs list)
         state["related_color"] = self.related_color  # assuming it's a list of class IDs
+        state["class_observation_counts"] = self.class_observation_counts
+        state["known_observation_count"] = self.known_observation_count
+        state["unknown_observation_count"] = self.unknown_observation_count
 
         return state
 
@@ -869,6 +1283,15 @@ class GlobalObject(BaseObject):
 
         # Restore related_color (assuming it's stored as a list of class IDs)
         self.related_color = state.get("related_color", [])
+        self.class_observation_counts = {
+            int(class_id): int(count)
+            for class_id, count in state.get("class_observation_counts", {}).items()
+        }
+        self.known_observation_count = int(state.get("known_observation_count", 0))
+        self.unknown_observation_count = int(state.get("unknown_observation_count", 0))
+
+        if not self.class_observation_counts and self.class_id is not None:
+            self.record_class_observation(self.class_id)
 
         # Set obs num to 1 to avoid global updating bug
         self.observed_num = 1
@@ -880,19 +1303,20 @@ class GlobalObject(BaseObject):
 
         self.uid = observation.uid
 
-        self.pcd = observation.pcd
-        self.bbox = observation.bbox
+        self.pcd = self.copy_point_cloud(observation.pcd)
+        self.bbox = self.safe_get_axis_aligned_bounding_box(self.pcd)
 
-        self.pcd_2d = observation.pcd_2d
-        self.bbox_2d = observation.bbox_2d
+        self.pcd_2d = self.copy_point_cloud(observation.pcd_2d)
+        self.bbox_2d = self.safe_get_axis_aligned_bounding_box(self.pcd_2d)
 
-        self.clip_ft = observation.clip_ft
+        self.clip_ft = np.asarray(observation.clip_ft, dtype=np.float32).copy()
 
         # Class ID
         self.class_id = observation.class_id
 
         # Related objs
         self.related_objs = observation.related_objs
+        self.record_class_observation(self.class_id)
 
     def add_observation(self, observation: Observation) -> None:
         self.observations.append(observation)
@@ -900,6 +1324,70 @@ class GlobalObject(BaseObject):
 
     def get_latest_observation(self) -> Observation:
         return self.observations[-1] if self.observations else None
+
+    def get_unknown_class_id(self):
+        if self._cfg is None:
+            return None
+        return getattr(self._cfg, "unknown_class_id", None)
+
+    def is_unknown_class_id(self, class_id) -> bool:
+        unknown_class_id = self.get_unknown_class_id()
+        return unknown_class_id is not None and class_id == unknown_class_id
+
+    def record_class_observation(self, class_id) -> None:
+        if class_id is None:
+            return
+
+        class_id = int(class_id)
+        self.class_observation_counts[class_id] = (
+            self.class_observation_counts.get(class_id, 0) + 1
+        )
+        if self.is_unknown_class_id(class_id):
+            self.unknown_observation_count += 1
+        else:
+            self.known_observation_count += 1
+
+    def resolve_class_id_from_history(self):
+        if not self.class_observation_counts:
+            return self.class_id
+
+        unknown_class_id = self.get_unknown_class_id()
+        known_counts = {
+            class_id: count
+            for class_id, count in self.class_observation_counts.items()
+            if unknown_class_id is None or class_id != unknown_class_id
+        }
+
+        if known_counts:
+            max_count = max(known_counts.values())
+            candidates = [
+                class_id
+                for class_id, count in known_counts.items()
+                if count == max_count
+            ]
+            if (
+                self.class_id in candidates
+                and self.class_id is not None
+                and not self.is_unknown_class_id(self.class_id)
+            ):
+                return self.class_id
+            return sorted(candidates)[0]
+
+        if unknown_class_id is not None and unknown_class_id in self.class_observation_counts:
+            return unknown_class_id
+
+        max_count = max(self.class_observation_counts.values())
+        candidates = [
+            class_id
+            for class_id, count in self.class_observation_counts.items()
+            if count == max_count
+        ]
+        if self.class_id in candidates and self.class_id is not None:
+            return self.class_id
+        return sorted(candidates)[0]
+
+    def merge_clip_feature(self, incoming_clip_ft, previous_count=None) -> None:
+        super().merge_clip_feature(incoming_clip_ft, previous_count=previous_count)
 
     def update_info(self) -> None:
         # Global Obj
@@ -913,53 +1401,46 @@ class GlobalObject(BaseObject):
         if self.observed_num == 1:
             self.uid = latest_obs.uid
 
-            self.pcd = latest_obs.pcd
-            self.bbox = latest_obs.bbox
-            self.pcd_2d = latest_obs.pcd_2d
-            self.bbox_2d = latest_obs.bbox_2d
+            self.pcd = self.copy_point_cloud(latest_obs.pcd)
+            self.bbox = self.safe_get_axis_aligned_bounding_box(self.pcd)
+            self.pcd_2d = self.copy_point_cloud(latest_obs.pcd_2d)
+            self.bbox_2d = self.safe_get_axis_aligned_bounding_box(self.pcd_2d)
 
-            self.clip_ft = latest_obs.clip_ft
+            self.clip_ft = np.asarray(latest_obs.clip_ft, dtype=np.float32).copy()
             self.class_id = latest_obs.class_id
 
-            self.related_objs = latest_obs.related_objs
+            self.related_objs = copy.deepcopy(latest_obs.related_objs)
 
             # for visualization in rerun
-            self.related_bbox = latest_obs.related_bbox
-            self.related_color = latest_obs.related_color
+            self.related_bbox = copy.deepcopy(latest_obs.related_bbox)
+            self.related_color = copy.deepcopy(latest_obs.related_color)
+            if not self.class_observation_counts:
+                self.record_class_observation(self.class_id)
             return
 
         # Update the information for outside
 
-        # Merge pcd
-        # Simply add
-        self.pcd += latest_obs.pcd
-        self.pcd = self.pcd.voxel_down_sample(
-            voxel_size=self._cfg.downsample_voxel_size
+        self.pcd, _, _ = self.apply_geometry_update(
+            current_pcd=self.pcd,
+            latest_pcd=latest_obs.pcd,
+            log_decision=self.get_object_geometry_update_mode() == "hybrid",
         )
 
         # Get new bbox
-        self.bbox = self.pcd.get_axis_aligned_bounding_box()
+        self.bbox = self.safe_get_axis_aligned_bounding_box(self.pcd)
 
-        # Merge pcd_2d
-        # get the points num of the latest obs and current pcd_2d
-        original_num = len(self.pcd_2d.points)
-        incoming_num = len(latest_obs.pcd_2d.points)
-
-        self.pcd_2d += latest_obs.pcd_2d
         self.pcd_2d = self.voxel_downsample_2d(
-            pcd=self.pcd_2d, voxel_size=self._cfg.downsample_voxel_size
+            pcd=self.copy_point_cloud(self.pcd),
+            voxel_size=self._cfg.downsample_voxel_size,
         )
-        self.bbox_2d = self.pcd_2d.get_axis_aligned_bounding_box()
+        self.bbox_2d = self.safe_get_axis_aligned_bounding_box(self.pcd_2d)
 
-        # TODO: Should we merge clip feat? Any judgement?
-        # Answer: Weighted merge
-
-        # TODO: for class id, we choose the bigger one? Currently we choose the bigger one as the output
-        # for class id, we choose the bigger one as the output
-        # bigger or smaller depends on the pointcloud size of the pcd_2d
-        if original_num < incoming_num:
-            self.class_id = latest_obs.class_id
-            self.clip_ft = latest_obs.clip_ft
+        self.merge_clip_feature(
+            latest_obs.clip_ft,
+            previous_count=max(self.observed_num - 1, 1),
+        )
+        self.record_class_observation(latest_obs.class_id)
+        self.class_id = self.resolve_class_id_from_history()
 
         # TODO: Any other matching strategy on related objs?
         # Maintain the related objs, simply add the objs from the latest observation (Current Strategy)

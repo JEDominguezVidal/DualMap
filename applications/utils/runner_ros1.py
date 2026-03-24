@@ -161,14 +161,56 @@ class RunnerROS1(RunnerROSBase):
 
     def synced_callback_tf(self, rgb_msg, depth_msg):
         """Callback for synchronised RGB-D input using TF for camera pose. Buffers frames."""
-        if len(self.tf_mode_queue) > 50:
-            self.tf_mode_queue.popleft()
-        self.tf_mode_queue.append((rgb_msg, depth_msg, time.monotonic()))
+        queue_limit = (
+            self.tf_runtime_queue_size
+            if self.has_valid_tf or not self.wait_for_first_valid_tf
+            else self.tf_warmup_queue_size
+        )
+        if queue_limit > 0 and len(self.tf_mode_queue) >= queue_limit:
+            old_entry = self.tf_mode_queue.popleft()
+            old_rgb = old_entry["rgb_msg"]
+            old_depth = old_entry["depth_msg"]
+            rgb_timestamp = old_rgb.header.stamp.to_sec()
+            depth_timestamp = old_depth.header.stamp.to_sec()
+            pose_frames = self.format_pose_frames(
+                self.tf_world_frame,
+                self.tf_camera_frame,
+            )
+            if self.wait_for_first_valid_tf and not self.has_valid_tf:
+                self.log_frame_sync(
+                    status="ignored_pre_tf",
+                    rgb_depth_dt=abs(rgb_timestamp - depth_timestamp),
+                    pose_rgb_dt=None,
+                    pose_mode=self.pose_represents,
+                    pose_frames=pose_frames,
+                    reason=f"tf_warmup_queue_full(limit={queue_limit})",
+                )
+            else:
+                self.dropped_frame_count += 1
+                self.log_frame_sync(
+                    status="dropped",
+                    rgb_depth_dt=abs(rgb_timestamp - depth_timestamp),
+                    pose_rgb_dt=None,
+                    pose_mode=self.pose_represents,
+                    pose_frames=pose_frames,
+                    reason=f"tf_runtime_queue_full(limit={queue_limit})",
+                )
+        self.tf_mode_queue.append(
+            {
+                "rgb_msg": rgb_msg,
+                "depth_msg": depth_msg,
+                "enqueue_time": time.monotonic(),
+                "last_warning_time": None,
+            }
+        )
 
     def process_tf_queue(self):
         """Process buffered frames and resolve TF transforms without blocking."""
         while self.tf_mode_queue:
-            rgb_msg, depth_msg, enqueue_time = self.tf_mode_queue[0]
+            entry = self.tf_mode_queue[0]
+            rgb_msg = entry["rgb_msg"]
+            depth_msg = entry["depth_msg"]
+            enqueue_time = entry["enqueue_time"]
             stamp = rgb_msg.header.stamp
             rgb_timestamp = rgb_msg.header.stamp.to_sec()
             depth_timestamp = depth_msg.header.stamp.to_sec()
@@ -201,22 +243,57 @@ class RunnerROS1(RunnerROSBase):
                 )
             except Exception as e:
                 elapsed = time.monotonic() - enqueue_time
-                if elapsed < self.tf_lookup_timeout:
+                if self.wait_for_first_valid_tf and not self.has_valid_tf:
+                    latest_transform = None
+                    try:
+                        latest_transform = self.tf_listener.lookupTransform(
+                            self.tf_world_frame,
+                            self.tf_camera_frame,
+                            rospy.Time(0),
+                        )
+                    except Exception:
+                        latest_transform = None
+
+                    if latest_transform is not None:
+                        trans, quat = latest_transform
+                    else:
+                        now = time.monotonic()
+                        last_warning_time = entry["last_warning_time"]
+                        if (
+                            elapsed >= self.tf_lookup_timeout
+                            and (
+                                last_warning_time is None
+                                or (now - last_warning_time) >= self.tf_lookup_timeout
+                            )
+                        ):
+                            self.log_frame_sync(
+                                status="warming_up",
+                                rgb_depth_dt=abs(rgb_timestamp - depth_timestamp),
+                                pose_rgb_dt=None,
+                                pose_mode=self.pose_represents,
+                                pose_frames=pose_frames,
+                                reason=f"waiting_for_first_valid_tf({elapsed:.3f}s): {e}",
+                            )
+                            entry["last_warning_time"] = now
+                        break
+                elif elapsed < self.tf_lookup_timeout:
                     break
-                self.dropped_frame_count += 1
-                self.log_frame_sync(
-                    status="dropped",
-                    rgb_depth_dt=abs(rgb_timestamp - depth_timestamp),
-                    pose_rgb_dt=None,
-                    pose_mode=self.pose_represents,
-                    pose_frames=pose_frames,
-                    reason=f"tf_lookup_timeout({elapsed:.3f}s): {e}",
-                )
-                self.tf_mode_queue.popleft()
-                continue
+                else:
+                    self.dropped_frame_count += 1
+                    self.log_frame_sync(
+                        status="dropped",
+                        rgb_depth_dt=abs(rgb_timestamp - depth_timestamp),
+                        pose_rgb_dt=None,
+                        pose_mode=self.pose_represents,
+                        pose_frames=pose_frames,
+                        reason=f"tf_lookup_timeout({elapsed:.3f}s): {e}",
+                    )
+                    self.tf_mode_queue.popleft()
+                    continue
 
             # Success: remove from queue
             self.tf_mode_queue.popleft()
+            self.mark_valid_tf(pose_frames)
 
             translation = np.array(trans)
             quaternion = np.array(quat)  # ROS1 tf returns (x, y, z, w)

@@ -61,6 +61,10 @@ class GlobalMapManager(BaseMapManager):
     def has_global_map(self) -> bool:
         return len(self.global_map) > 0
 
+    def is_unknown_class_id(self, class_id) -> bool:
+        unknown_class_id = getattr(self.cfg, "unknown_class_id", None)
+        return unknown_class_id is not None and class_id == unknown_class_id
+
     def set_layout_info(self, layout_pcd):
         self.layout_map.set_layout_pcd(layout_pcd)
 
@@ -80,37 +84,20 @@ class GlobalMapManager(BaseMapManager):
             return
 
         if self.is_initialized == False:
-            # Init the global map
             logger.info("[GlobalMap] Init Global Map by first Local Map input")
             self.global_map = self.init_from_observation(curr_observations)
             self.is_initialized = True
-            return
-
-        # The test part, no matching just adding
-        if self.cfg.no_update:
+        elif self.cfg.no_update:
             logger.info("[GlobalMap] No update mode, simply adding")
             for obs in curr_observations:
                 self.global_map.append(GlobalObject(obs))
-
-            if self.cfg.use_rerun:
-                self.visualize_global_map()
-
-            return
-
-        # if not the first, then do the global matching
-        logger.info("[GlobalMap] Matching")
-        self.tracker.set_current_frame(curr_observations)
-
-        # Set tracker reference
-        self.tracker.set_ref_map(self.global_map)
-        self.tracker.matching_map()
-
-        # After matching map, current frame information will be updated
-        curr_observations = self.tracker.get_current_frame()
-
-        # Update global map
-        self.update_global_map(curr_observations)
-        # visualize the global map
+        else:
+            logger.info("[GlobalMap] Matching")
+            self.tracker.set_current_frame(curr_observations)
+            self.tracker.set_ref_map(self.global_map)
+            self.tracker.matching_map()
+            curr_observations = self.tracker.get_current_frame()
+            self.update_global_map(curr_observations)
 
         if self.cfg.use_rerun:
             self.visualize_global_map()
@@ -145,10 +132,34 @@ class GlobalMapManager(BaseMapManager):
                 # Update existed global object
                 matched_obj_idx = obs.matched_obj_idx
                 matched_obj = self.global_map[matched_obj_idx]
+                if not self.is_global_update_compatible(matched_obj, obs):
+                    logger.info(
+                        "[GlobalMap] Rejected incompatible update: obs_class=%s map_class=%s uid=%s",
+                        getattr(obs, "class_id", None),
+                        getattr(matched_obj, "class_id", None),
+                        matched_obj.uid,
+                    )
+                    global_obj = GlobalObject()
+                    global_obj.add_observation(obs)
+                    global_obj.update_info()
+                    self.global_map.append(global_obj)
+                    continue
                 matched_obj.add_observation(obs)
                 matched_obj.update_info()
 
         pass
+
+    def is_global_update_compatible(self, global_obj: GlobalObject, obs: Observation) -> bool:
+        map_unknown = self.is_unknown_class_id(getattr(global_obj, "class_id", None))
+        obs_unknown = self.is_unknown_class_id(getattr(obs, "class_id", None))
+
+        if not map_unknown and not obs_unknown:
+            return getattr(global_obj, "class_id", None) == getattr(obs, "class_id", None)
+        if not map_unknown and obs_unknown:
+            return True
+        if map_unknown and obs_unknown:
+            return True
+        return False
 
     def save_map(self) -> None:
         # get the directory

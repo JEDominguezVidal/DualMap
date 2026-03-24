@@ -2,11 +2,13 @@ import logging
 import os
 import pdb
 import shutil
+import copy
 from collections import Counter
 from typing import List
 
 import networkx as nx
 import numpy as np
+import open3d as o3d
 from omegaconf import DictConfig
 
 from utils.base_map_manager import BaseMapManager
@@ -35,6 +37,8 @@ class LocalMapManager(BaseMapManager):
         # objects list
         self.local_map = []
         self.global_map = []
+        self.is_end_processing = False
+        self.end_process_dedupe_done = False
 
         self.graph = nx.Graph()  # Use undirected graph to manage object relationships
         self.current_relations = set()
@@ -91,6 +95,18 @@ class LocalMapManager(BaseMapManager):
             if obj.uid == uid:
                 return obj
 
+    def should_enable_local_split(self) -> bool:
+        configured_value = getattr(self.cfg, "enable_local_split", None)
+        if configured_value is not None:
+            return bool(configured_value)
+        return getattr(self.cfg, "dataset_name", "") != "rosbag_tf"
+
+    def should_promote_global_during_run(self) -> bool:
+        configured_value = getattr(self.cfg, "promote_global_during_run", None)
+        if configured_value is not None:
+            return bool(configured_value)
+        return getattr(self.cfg, "dataset_name", "") != "rosbag_tf"
+
     def set_relation(self, obj1_uid, obj2_uid):
         """Set a relation between two objects based on their UIDs."""
         # Check if both objects exist
@@ -136,11 +152,21 @@ class LocalMapManager(BaseMapManager):
 
             self.init_from_observation(curr_observations)
             self.is_initialized = True
+            logger.info(
+                "[LocalMap] Frame summary: observations=%d added_local_objects=%d local_map_size=%d",
+                len(curr_observations),
+                len(curr_observations),
+                len(self.local_map),
+            )
             return
 
         if len(curr_observations) == 0:
             logger.warning("[LocalMap] No observation in this frame")
             self.update_local_map(curr_observations)
+            logger.info(
+                "[LocalMap] Frame summary: observations=0 added_local_objects=0 local_map_size=%d",
+                len(self.local_map),
+            )
             return
 
         # if not first, then do the matching
@@ -156,6 +182,12 @@ class LocalMapManager(BaseMapManager):
 
         # Update local map
         self.update_local_map(curr_observations)
+        logger.info(
+            "[LocalMap] Frame summary: observations=%d added_local_objects=%d local_map_size=%d",
+            len(curr_observations),
+            self.tracker.get_last_added_new_objects(),
+            len(self.local_map),
+        )
 
     def init_from_observation(
         self,
@@ -172,6 +204,8 @@ class LocalMapManager(BaseMapManager):
             self.graph.add_node(local_obj.uid)
 
     def update_local_map(self, curr_obs: List[Observation]) -> None:
+        self.is_end_processing = False
+        self.end_process_dedupe_done = False
         # update the local map with the lateset observation
         for obs in curr_obs:
             if obs.matched_obj_idx == -1:
@@ -192,9 +226,10 @@ class LocalMapManager(BaseMapManager):
         # traverse through the local map
         # split the local obj with the split marker
         # Solve couch + pillow problem
-        for obj in self.local_map:
-            if obj.should_split:
-                self.split_local_object(obj)
+        if self.should_enable_local_split():
+            for obj in self.local_map:
+                if obj.should_split:
+                    self.split_local_object(obj)
 
         # update the graph and map for insertion and elimination
         self.update_map_and_graph()
@@ -212,10 +247,11 @@ class LocalMapManager(BaseMapManager):
         # update the graph and map for insertion and elimination
         self.update_map_and_graph()
 
-        logger.info(
-            "[LocalMap] Current we have Global Observations num: "
-            + str(len(self.global_observations))
-        )
+        if self.global_observations or self.is_end_processing:
+            logger.info(
+                "[LocalMap] Current we have Global Observations num: "
+                + str(len(self.global_observations))
+            )
 
         if self.cfg.use_rerun:
             self.visualize_local_map()
@@ -223,6 +259,14 @@ class LocalMapManager(BaseMapManager):
     def end_process(
         self,
     ) -> None:
+        self.is_end_processing = True
+
+        if not self.end_process_dedupe_done:
+            for obj in self.local_map:
+                obj.update_status()
+            self.dedupe_end_process_local_map()
+            self.log_end_process_geometry_summary()
+            self.end_process_dedupe_done = True
 
         for obj in self.local_map:
             # Update the status of the current local object
@@ -236,6 +280,27 @@ class LocalMapManager(BaseMapManager):
 
         if self.cfg.use_rerun:
             self.visualize_local_map()
+
+    def log_end_process_geometry_summary(self) -> None:
+        merged_objects = 0
+        replaced_objects = 0
+        appended_objects = 0
+
+        for obj in self.local_map:
+            stats = getattr(obj, "geometry_update_stats", {})
+            if stats.get("merged", 0) > 0:
+                merged_objects += 1
+            if stats.get("replaced", 0) > 0:
+                replaced_objects += 1
+            if stats.get("appended", 0) > 0:
+                appended_objects += 1
+
+        logger.info(
+            "[LocalMap][EndProcess] Geometry summary: merged_objects=%d replaced_objects=%d appended_objects=%d",
+            merged_objects,
+            replaced_objects,
+            appended_objects,
+        )
 
     def update_map_and_graph(
         self,
@@ -274,6 +339,12 @@ class LocalMapManager(BaseMapManager):
 
     def status_actions(self, obj: LocalObject) -> None:
         # do actions based on the object status
+        if (
+            not self.is_end_processing
+            and not self.should_promote_global_during_run()
+            and obj.status in {LocalObjStatus.HM_ELIMINATION, LocalObjStatus.LM_ELIMINATION}
+        ):
+            return
 
         # Set Relations
         # if the object is stable, then no matter in what status,
@@ -476,6 +547,144 @@ class LocalMapManager(BaseMapManager):
 
         return True
 
+    def is_unknown_class_id(self, class_id) -> bool:
+        unknown_class_id = getattr(self.cfg, "unknown_class_id", None)
+        return unknown_class_id is not None and class_id == unknown_class_id
+
+    @staticmethod
+    def compute_clip_cosine(clip_a, clip_b) -> float:
+        clip_a = np.asarray(clip_a, dtype=np.float32)
+        clip_b = np.asarray(clip_b, dtype=np.float32)
+        if clip_a.size == 0 or clip_b.size == 0:
+            return 0.0
+        denom = np.linalg.norm(clip_a) * np.linalg.norm(clip_b)
+        if denom <= 1e-8:
+            return 0.0
+        return float(np.dot(clip_a, clip_b) / denom)
+
+    @staticmethod
+    def compute_bbox2d_overlap_ratio(bbox_a, bbox_b) -> float:
+        min_a = np.asarray(bbox_a.get_min_bound(), dtype=np.float32)
+        max_a = np.asarray(bbox_a.get_max_bound(), dtype=np.float32)
+        min_b = np.asarray(bbox_b.get_min_bound(), dtype=np.float32)
+        max_b = np.asarray(bbox_b.get_max_bound(), dtype=np.float32)
+
+        inter_min = np.maximum(min_a[:2], min_b[:2])
+        inter_max = np.minimum(max_a[:2], max_b[:2])
+        inter_dims = np.maximum(inter_max - inter_min, 0.0)
+        inter_area = inter_dims[0] * inter_dims[1]
+
+        area_a = max((max_a[0] - min_a[0]) * (max_a[1] - min_a[1]), 1e-8)
+        area_b = max((max_b[0] - min_b[0]) * (max_b[1] - min_b[1]), 1e-8)
+        return float(max(inter_area / area_a, inter_area / area_b))
+
+    @staticmethod
+    def compute_bbox3d_intersection(bbox_a, bbox_b) -> float:
+        min_a = np.asarray(bbox_a.get_min_bound(), dtype=np.float32)
+        max_a = np.asarray(bbox_a.get_max_bound(), dtype=np.float32)
+        min_b = np.asarray(bbox_b.get_min_bound(), dtype=np.float32)
+        max_b = np.asarray(bbox_b.get_max_bound(), dtype=np.float32)
+
+        inter_min = np.maximum(min_a, min_b)
+        inter_max = np.minimum(max_a, max_b)
+        inter_dims = np.maximum(inter_max - inter_min, 0.0)
+        return float(np.prod(inter_dims))
+
+    def should_dedupe_local_objects(self, obj_a: LocalObject, obj_b: LocalObject) -> bool:
+        class_a = getattr(obj_a, "class_id", None)
+        class_b = getattr(obj_b, "class_id", None)
+        class_a_unknown = self.is_unknown_class_id(class_a)
+        class_b_unknown = self.is_unknown_class_id(class_b)
+
+        if not class_a_unknown and not class_b_unknown and class_a != class_b:
+            return False
+
+        clip_cos = self.compute_clip_cosine(obj_a.clip_ft, obj_b.clip_ft)
+        if clip_cos < 0.35:
+            return False
+
+        center_a = np.asarray(obj_a.bbox.get_center(), dtype=np.float32)
+        center_b = np.asarray(obj_b.bbox.get_center(), dtype=np.float32)
+        if np.linalg.norm(center_a[:2] - center_b[:2]) > 0.03:
+            return False
+
+        bbox_overlap = self.compute_bbox2d_overlap_ratio(
+            obj_a.bbox,
+            obj_b.bbox,
+        )
+        if bbox_overlap >= 0.25:
+            return True
+
+        return self.compute_bbox3d_intersection(obj_a.bbox, obj_b.bbox) > 0.0
+
+    def dedupe_end_process_local_map(self) -> None:
+        if len(self.local_map) <= 1:
+            return
+
+        stable_indices = [
+            idx
+            for idx, obj in enumerate(self.local_map)
+            if obj.is_stable and obj.is_low_mobility
+        ]
+        if len(stable_indices) <= 1:
+            return
+
+        parent = {idx: idx for idx in stable_indices}
+
+        def find(idx):
+            while parent[idx] != idx:
+                parent[idx] = parent[parent[idx]]
+                idx = parent[idx]
+            return idx
+
+        def union(idx_a, idx_b):
+            root_a = find(idx_a)
+            root_b = find(idx_b)
+            if root_a != root_b:
+                parent[root_b] = root_a
+
+        for offset, idx_a in enumerate(stable_indices):
+            for idx_b in stable_indices[offset + 1 :]:
+                if self.should_dedupe_local_objects(
+                    self.local_map[idx_a], self.local_map[idx_b]
+                ):
+                    union(idx_a, idx_b)
+
+        groups = {}
+        for idx in stable_indices:
+            groups.setdefault(find(idx), []).append(idx)
+
+        merged_groups = [indices for indices in groups.values() if len(indices) > 1]
+        if not merged_groups:
+            return
+
+        merged_members = {idx for group in merged_groups for idx in group}
+        new_local_map = []
+        for idx, obj in enumerate(self.local_map):
+            if idx in merged_members:
+                continue
+            new_local_map.append(obj)
+
+        for indices in merged_groups:
+            merged_obj = self.merge_local_object([self.local_map[idx] for idx in indices])
+            merged_obj.is_merged = True
+            new_local_map.append(merged_obj)
+
+        old_size = len(self.local_map)
+        self.local_map = new_local_map
+        self.graph = nx.Graph()
+        for obj in self.local_map:
+            self.graph.add_node(obj.uid)
+        self.current_relations.clear()
+        self.to_be_eliminated.clear()
+
+        logger.info(
+            "[LocalMap][EndProcess] Dedupe merged %d groups (%d -> %d objects).",
+            len(merged_groups),
+            old_size,
+            len(self.local_map),
+        )
+
     def create_global_observation(
         self, obj: LocalObject, related_objs: List[LocalObject] = []
     ) -> Observation:
@@ -486,11 +695,11 @@ class LocalMapManager(BaseMapManager):
         # set info for global observation
         curr_obs.uid = obj.uid
         curr_obs.class_id = obj.class_id
-        curr_obs.pcd = obj.pcd
+        curr_obs.pcd = copy.deepcopy(obj.pcd)
         curr_obs.bbox = obj.pcd.get_axis_aligned_bounding_box()
-        curr_obs.clip_ft = obj.clip_ft
+        curr_obs.clip_ft = np.asarray(obj.clip_ft, dtype=np.float32).copy()
         # Use configurable voxel size for downsampling
-        pcd_2d = obj.voxel_downsample_2d(obj.pcd, self.cfg.downsample_voxel_size)
+        pcd_2d = obj.voxel_downsample_2d(copy.deepcopy(obj.pcd), self.cfg.downsample_voxel_size)
         curr_obs.pcd_2d = pcd_2d
         curr_obs.bbox_2d = pcd_2d.get_axis_aligned_bounding_box()
 
