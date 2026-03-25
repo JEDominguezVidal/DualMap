@@ -137,7 +137,15 @@ use_fastsam: True
 fastsam_mode: uncovered_only
 # Conservative defaults for tabletop rosbag runs. The goal is to keep only a
 # small number of genuinely novel masks and avoid flooding the unified filter.
-fastsam_uncovered_max_masks: 8
+fastsam_uncovered_max_masks: 12
+# Reserve a very small number of truly tiny masks for tabletop parts that are
+# fully novel but lose against larger FastSAM masks in the main ranking.
+fastsam_uncovered_small_mask_quota: 2
+fastsam_uncovered_small_mask_min_pixels: 180
+fastsam_uncovered_small_mask_max_pixels: 260
+fastsam_uncovered_small_ignore_border_px: 4
+fastsam_uncovered_small_min_bbox_width: 10
+fastsam_uncovered_small_min_bbox_height: 10
 fastsam_uncovered_max_area_ratio: 0.12
 fastsam_uncovered_min_mask_pixels: 80
 fastsam_uncovered_min_novel_pixels: 150
@@ -445,6 +453,13 @@ promote_global_during_run: false
 
 # Enable clean shutdown with map saving and time cost calculation
 use_end_process: True
+# Run a final conservative dedupe over residual local-map fragments before
+# promoting them to the global map. Useful for absorbing tiny FastSAM remnants
+# that survived tracking and the main end-process dedupe.
+end_process_residual_dedupe_enabled: true
+# Maximum number of 3D points for an object to be considered a residual fragment
+# in the final dedupe pass above.
+end_process_fragment_max_points: 80
 
 
 # -------------------------------------------------------

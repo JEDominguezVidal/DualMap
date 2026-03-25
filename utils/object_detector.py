@@ -740,6 +740,29 @@ class Detector:
             return bool(configured_value)
         return not self.is_rosbag_tf_mode()
 
+    @staticmethod
+    def mask_bbox_touches_border(
+        bbox: np.ndarray,
+        image_shape: tuple[int, int],
+        border_px: int,
+    ) -> bool:
+        if border_px <= 0:
+            return False
+
+        height, width = image_shape
+        x_min, y_min, x_max, y_max = [float(value) for value in bbox]
+        return (
+            x_min <= border_px
+            or y_min <= border_px
+            or x_max >= (width - border_px)
+            or y_max >= (height - border_px)
+        )
+
+    @staticmethod
+    def get_bbox_dimensions(bbox: np.ndarray) -> tuple[float, float]:
+        x_min, y_min, x_max, y_max = [float(value) for value in bbox]
+        return max(x_max - x_min, 0.0), max(y_max - y_min, 0.0)
+
     def filter_fs_detections_uncovered_only(self, fs_detections, curr_detections):
         num_fs = len(fs_detections.xyxy)
         if num_fs == 0:
@@ -768,6 +791,30 @@ class Detector:
             getattr(self.cfg, "fastsam_uncovered_min_novel_ratio", 0.55)
         )
         max_masks = int(getattr(self.cfg, "fastsam_uncovered_max_masks", 8))
+        small_mask_quota = max(
+            int(getattr(self.cfg, "fastsam_uncovered_small_mask_quota", 0)),
+            0,
+        )
+        small_mask_min_pixels = max(
+            int(getattr(self.cfg, "fastsam_uncovered_small_mask_min_pixels", 180)),
+            min_novel_pixels,
+        )
+        small_mask_max_pixels = max(
+            int(getattr(self.cfg, "fastsam_uncovered_small_mask_max_pixels", 260)),
+            small_mask_min_pixels,
+        )
+        small_ignore_border_px = max(
+            int(getattr(self.cfg, "fastsam_uncovered_small_ignore_border_px", 4)),
+            0,
+        )
+        small_min_bbox_width = max(
+            int(getattr(self.cfg, "fastsam_uncovered_small_min_bbox_width", 10)),
+            1,
+        )
+        small_min_bbox_height = max(
+            int(getattr(self.cfg, "fastsam_uncovered_small_min_bbox_height", 10)),
+            1,
+        )
 
         candidates = []
         for det_idx in range(num_fs):
@@ -787,7 +834,16 @@ class Detector:
             if novel_pixels < min_novel_pixels or novel_ratio < min_novel_ratio:
                 continue
 
-            candidates.append((novel_pixels, novel_ratio, mask_pixels, det_idx, mask))
+            candidates.append(
+                {
+                    "novel_pixels": novel_pixels,
+                    "novel_ratio": novel_ratio,
+                    "mask_pixels": mask_pixels,
+                    "det_idx": det_idx,
+                    "mask": mask,
+                    "bbox": np.asarray(fs_detections.xyxy[det_idx], dtype=np.float32),
+                }
+            )
 
         if not candidates:
             return self.slice_detections(
@@ -797,14 +853,21 @@ class Detector:
 
         keep_mask = np.zeros(num_fs, dtype=bool)
         kept_count = 0
-        for _, _, _, det_idx, mask in sorted(
+        sorted_candidates = sorted(
             candidates,
-            key=lambda item: (item[0], item[1], item[2]),
+            key=lambda item: (
+                item["novel_pixels"],
+                item["novel_ratio"],
+                item["mask_pixels"],
+            ),
             reverse=True,
-        ):
+        )
+        for candidate in sorted_candidates:
+            mask = candidate["mask"]
+            det_idx = candidate["det_idx"]
             novel_mask = np.logical_and(mask, np.logical_not(covered_mask))
             novel_pixels = int(np.sum(novel_mask))
-            novel_ratio = novel_pixels / max(int(np.sum(mask)), 1)
+            novel_ratio = novel_pixels / max(int(candidate["mask_pixels"]), 1)
 
             if novel_pixels < min_novel_pixels or novel_ratio < min_novel_ratio:
                 continue
@@ -814,6 +877,47 @@ class Detector:
             kept_count += 1
             if max_masks > 0 and kept_count >= max_masks:
                 break
+
+        if small_mask_quota > 0:
+            small_kept = 0
+            for candidate in sorted_candidates:
+                if small_kept >= small_mask_quota:
+                    break
+
+                if keep_mask[candidate["det_idx"]]:
+                    continue
+
+                mask_pixels = int(candidate["mask_pixels"])
+                if (
+                    mask_pixels < small_mask_min_pixels
+                    or mask_pixels > small_mask_max_pixels
+                ):
+                    continue
+
+                bbox_width, bbox_height = self.get_bbox_dimensions(candidate["bbox"])
+                if (
+                    bbox_width < small_min_bbox_width
+                    or bbox_height < small_min_bbox_height
+                ):
+                    continue
+
+                if self.mask_bbox_touches_border(
+                    candidate["bbox"],
+                    image_shape,
+                    small_ignore_border_px,
+                ):
+                    continue
+
+                mask = candidate["mask"]
+                novel_mask = np.logical_and(mask, np.logical_not(covered_mask))
+                novel_pixels = int(np.sum(novel_mask))
+                novel_ratio = novel_pixels / max(mask_pixels, 1)
+                if novel_pixels < min_novel_pixels or novel_ratio < min_novel_ratio:
+                    continue
+
+                keep_mask[candidate["det_idx"]] = True
+                covered_mask = np.logical_or(covered_mask, mask)
+                small_kept += 1
 
         return self.slice_detections(fs_detections, keep_mask)
 
@@ -1879,12 +1983,21 @@ class Detector:
         if clip_cos < 0.35:
             return False
 
+        bbox_overlap = self.compute_bbox_xy_overlap_ratio(obs_a.bbox, obs_b.bbox)
         center_a = np.asarray(obs_a.bbox.get_center(), dtype=np.float32)
         center_b = np.asarray(obs_b.bbox.get_center(), dtype=np.float32)
-        if np.linalg.norm(center_a[:2] - center_b[:2]) > 0.03:
+        centroid_xy_dist = np.linalg.norm(center_a[:2] - center_b[:2])
+
+        # If a known and an unknown observation are almost identical, let them
+        # collapse even with a slightly larger centroid offset. This catches
+        # viewpoint/depth jitter on the same physical object without relaxing
+        # the general dedupe gate.
+        if clip_cos >= 0.90 and bbox_overlap >= 0.25 and centroid_xy_dist <= 0.08:
+            return True
+
+        if centroid_xy_dist > 0.03:
             return False
 
-        bbox_overlap = self.compute_bbox_xy_overlap_ratio(obs_a.bbox, obs_b.bbox)
         if bbox_overlap >= 0.25:
             return True
 

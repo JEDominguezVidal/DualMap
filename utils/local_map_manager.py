@@ -107,6 +107,30 @@ class LocalMapManager(BaseMapManager):
             return bool(configured_value)
         return getattr(self.cfg, "dataset_name", "") != "rosbag_tf"
 
+    def should_enable_end_process_residual_dedupe(self) -> bool:
+        configured_value = getattr(
+            self.cfg, "end_process_residual_dedupe_enabled", None
+        )
+        if configured_value is not None:
+            return bool(configured_value)
+        return True
+
+    def get_end_process_fragment_max_points(self) -> int:
+        return int(getattr(self.cfg, "end_process_fragment_max_points", 80))
+
+    @staticmethod
+    def get_object_point_count(obj) -> int:
+        pcd = getattr(obj, "pcd", None)
+        if pcd is None or not hasattr(pcd, "points"):
+            return 0
+        return len(pcd.points)
+
+    def get_local_object_merge_priority(self, obj) -> tuple:
+        is_known = int(not self.is_unknown_class_id(getattr(obj, "class_id", None)))
+        point_count = self.get_object_point_count(obj)
+        observed_num = int(getattr(obj, "observed_num", 0))
+        return (is_known, point_count, observed_num)
+
     def set_relation(self, obj1_uid, obj2_uid):
         """Set a relation between two objects based on their UIDs."""
         # Check if both objects exist
@@ -265,6 +289,7 @@ class LocalMapManager(BaseMapManager):
             for obj in self.local_map:
                 obj.update_status()
             self.dedupe_end_process_local_map()
+            self.dedupe_end_process_residual_fragments()
             self.log_end_process_geometry_summary()
             self.end_process_dedupe_done = True
 
@@ -603,33 +628,100 @@ class LocalMapManager(BaseMapManager):
         if clip_cos < 0.35:
             return False
 
+        bbox_overlap = self.compute_bbox2d_overlap_ratio(
+            obj_a.bbox,
+            obj_b.bbox,
+        )
         center_a = np.asarray(obj_a.bbox.get_center(), dtype=np.float32)
         center_b = np.asarray(obj_b.bbox.get_center(), dtype=np.float32)
-        if np.linalg.norm(center_a[:2] - center_b[:2]) > 0.03:
+        centroid_xy_dist = np.linalg.norm(center_a[:2] - center_b[:2])
+
+        # High-confidence fallback for near-identical known/unknown pairs created
+        # by slightly different masks or depth jitter across viewpoints.
+        if clip_cos >= 0.90 and bbox_overlap >= 0.25 and centroid_xy_dist <= 0.08:
+            return True
+
+        if centroid_xy_dist > 0.03:
+            return False
+
+        if bbox_overlap >= 0.25:
+            return True
+
+        return self.compute_bbox3d_intersection(obj_a.bbox, obj_b.bbox) > 0.0
+
+    def should_dedupe_residual_fragment_pair(
+        self, obj_a: LocalObject, obj_b: LocalObject
+    ) -> bool:
+        class_a = getattr(obj_a, "class_id", None)
+        class_b = getattr(obj_b, "class_id", None)
+        class_a_unknown = self.is_unknown_class_id(class_a)
+        class_b_unknown = self.is_unknown_class_id(class_b)
+
+        if not class_a_unknown and not class_b_unknown and class_a != class_b:
+            return False
+
+        if (
+            min(
+                self.get_object_point_count(obj_a),
+                self.get_object_point_count(obj_b),
+            )
+            > self.get_end_process_fragment_max_points()
+        ):
+            return False
+
+        clip_cos = self.compute_clip_cosine(obj_a.clip_ft, obj_b.clip_ft)
+        if clip_cos < 0.90:
             return False
 
         bbox_overlap = self.compute_bbox2d_overlap_ratio(
             obj_a.bbox,
             obj_b.bbox,
         )
-        if bbox_overlap >= 0.25:
-            return True
+        if bbox_overlap < 0.25:
+            return False
 
-        return self.compute_bbox3d_intersection(obj_a.bbox, obj_b.bbox) > 0.0
+        center_a = np.asarray(obj_a.bbox.get_center(), dtype=np.float32)
+        center_b = np.asarray(obj_b.bbox.get_center(), dtype=np.float32)
+        centroid_xy_dist = np.linalg.norm(center_a[:2] - center_b[:2])
+        return centroid_xy_dist <= 0.08
 
-    def dedupe_end_process_local_map(self) -> None:
-        if len(self.local_map) <= 1:
-            return
+    def should_dedupe_residual_tiny_unknown_pair(
+        self, obj_a: LocalObject, obj_b: LocalObject
+    ) -> bool:
+        if not (
+            self.is_unknown_class_id(getattr(obj_a, "class_id", None))
+            and self.is_unknown_class_id(getattr(obj_b, "class_id", None))
+        ):
+            return False
 
-        stable_indices = [
-            idx
-            for idx, obj in enumerate(self.local_map)
-            if obj.is_stable and obj.is_low_mobility
-        ]
-        if len(stable_indices) <= 1:
-            return
+        if (
+            self.get_object_point_count(obj_a) > 25
+            or self.get_object_point_count(obj_b) > 25
+        ):
+            return False
 
-        parent = {idx: idx for idx in stable_indices}
+        clip_cos = self.compute_clip_cosine(obj_a.clip_ft, obj_b.clip_ft)
+        if clip_cos < 0.95:
+            return False
+
+        center_a = np.asarray(obj_a.bbox.get_center(), dtype=np.float32)
+        center_b = np.asarray(obj_b.bbox.get_center(), dtype=np.float32)
+        centroid_xy_dist = np.linalg.norm(center_a[:2] - center_b[:2])
+        return centroid_xy_dist <= 0.04
+
+    def should_dedupe_residual_pair(
+        self, obj_a: LocalObject, obj_b: LocalObject
+    ) -> bool:
+        return self.should_dedupe_residual_fragment_pair(
+            obj_a, obj_b
+        ) or self.should_dedupe_residual_tiny_unknown_pair(obj_a, obj_b)
+
+    @staticmethod
+    def build_merge_groups(candidate_indices, should_merge_fn) -> list[list[int]]:
+        if len(candidate_indices) <= 1:
+            return []
+
+        parent = {idx: idx for idx in candidate_indices}
 
         def find(idx):
             while parent[idx] != idx:
@@ -643,18 +735,17 @@ class LocalMapManager(BaseMapManager):
             if root_a != root_b:
                 parent[root_b] = root_a
 
-        for offset, idx_a in enumerate(stable_indices):
-            for idx_b in stable_indices[offset + 1 :]:
-                if self.should_dedupe_local_objects(
-                    self.local_map[idx_a], self.local_map[idx_b]
-                ):
+        for offset, idx_a in enumerate(candidate_indices):
+            for idx_b in candidate_indices[offset + 1 :]:
+                if should_merge_fn(idx_a, idx_b):
                     union(idx_a, idx_b)
 
         groups = {}
-        for idx in stable_indices:
+        for idx in candidate_indices:
             groups.setdefault(find(idx), []).append(idx)
+        return [indices for indices in groups.values() if len(indices) > 1]
 
-        merged_groups = [indices for indices in groups.values() if len(indices) > 1]
+    def apply_merged_groups(self, merged_groups: list[list[int]], log_label: str) -> None:
         if not merged_groups:
             return
 
@@ -666,7 +757,14 @@ class LocalMapManager(BaseMapManager):
             new_local_map.append(obj)
 
         for indices in merged_groups:
-            merged_obj = self.merge_local_object([self.local_map[idx] for idx in indices])
+            sorted_indices = sorted(
+                indices,
+                key=lambda idx: self.get_local_object_merge_priority(self.local_map[idx]),
+                reverse=True,
+            )
+            merged_obj = self.merge_local_object(
+                [self.local_map[idx] for idx in sorted_indices]
+            )
             merged_obj.is_merged = True
             new_local_map.append(merged_obj)
 
@@ -679,10 +777,44 @@ class LocalMapManager(BaseMapManager):
         self.to_be_eliminated.clear()
 
         logger.info(
-            "[LocalMap][EndProcess] Dedupe merged %d groups (%d -> %d objects).",
+            "%s merged %d groups (%d -> %d objects).",
+            log_label,
             len(merged_groups),
             old_size,
             len(self.local_map),
+        )
+
+    def dedupe_end_process_local_map(self) -> None:
+        if len(self.local_map) <= 1:
+            return
+
+        stable_indices = [
+            idx
+            for idx, obj in enumerate(self.local_map)
+            if obj.is_stable and obj.is_low_mobility
+        ]
+        merged_groups = self.build_merge_groups(
+            stable_indices,
+            lambda idx_a, idx_b: self.should_dedupe_local_objects(
+                self.local_map[idx_a], self.local_map[idx_b]
+            ),
+        )
+        self.apply_merged_groups(merged_groups, "[LocalMap][EndProcess] Dedupe")
+
+    def dedupe_end_process_residual_fragments(self) -> None:
+        if not self.should_enable_end_process_residual_dedupe():
+            return
+
+        candidate_indices = list(range(len(self.local_map)))
+        merged_groups = self.build_merge_groups(
+            candidate_indices,
+            lambda idx_a, idx_b: self.should_dedupe_residual_pair(
+                self.local_map[idx_a], self.local_map[idx_b]
+            ),
+        )
+        self.apply_merged_groups(
+            merged_groups,
+            "[LocalMap][EndProcessResidual] Dedupe",
         )
 
     def create_global_observation(
