@@ -1,0 +1,42 @@
+# Docker runtime lock derived from the validated dualmap312 environment.
+# ROS Python packages are intentionally excluded because they are provided
+# by the ROS 2 Jazzy base image through apt and setup.bash.
+
+torch==2.10.0
+torchvision==0.25.0
+torchaudio==2.10.0
+open_clip_torch==3.2.0
+timm==1.0.24
+tyro==1.0.6
+wandb==0.25.0
+h5py==3.15.1
+openai==2.21.0
+hydra-core==1.3.2
+distinctipy==1.3.4
+ultralytics==8.4.14
+dill==0.4.0
+supervision==0.27.0.post1
+open3d==0.19.0
+imageio==2.37.2
+natsort==8.4.0
+kornia==0.8.2
+rerun-sdk==0.23.1
+pyliblzfse==0.4.1
+pypng==0.20220715.0
+tabulate==0.9.0
+pympler==1.1
+plyfile==1.1.3
+numpy==1.26.4
+psutil==7.2.2
+faiss-cpu==1.13.2
+scipy==1.17.0
+scikit-learn==1.8.0
+opencv-python==4.11.0.86
+matplotlib==3.10.8
+networkx==3.6.1
+PyYAML==6.0.3
+tqdm==4.67.3
+pandas==3.0.0
+pillow==12.1.1
+git+https://github.com/ultralytics/CLIP.git
+

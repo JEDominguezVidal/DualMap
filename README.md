@@ -76,6 +76,34 @@ source /opt/ros/jazzy/setup.bash
 
 > For the best DualMap experience (especially interactive mapping and navigation), **we strongly recommend setting up the Habitat Data Collector**. See [the repo](https://github.com/Eku127/habitat-data-collector) for installation and usage details.
 
+### 6. (Optional) Run with Docker for ROS2
+
+The local Python environment above remains the primary installation path and is fully supported.
+In addition, this repository now ships a ROS2-focused Docker workflow that can run the online ROS runner without creating a local virtual environment.
+
+Docker scope in this repository:
+
+- ROS2 Jazzy only
+- `python -m applications.runner_ros`
+- Both supported pose sources:
+  - `nav_msgs/Odometry`
+  - `TF` / `TF_STATIC`
+
+The Docker workflow does **not** replace the current `venv` workflow and does **not** cover ROS1 or Record3D in its first version.
+
+See the full guide here:
+
+- [ROS2 Docker Guide](resources/doc/app_runner_ros_docker.md)
+
+Quick start:
+
+```bash
+docker build -f docker/Dockerfile.ros2 --target ros2-light -t dualmap:ros2-light .
+LOCAL_UID=$(id -u) LOCAL_GID=$(id -g) docker compose -f docker/compose.ros2.yaml --profile headless up dualmap-ros2-headless
+```
+
+The full Docker guide also covers the one-time cleanup of older DualMap Docker images/volumes, the new writable `.docker-cache/` layout, and the GUI default that uses `ros2-bundled`.
+
 
 ## Applications
 
@@ -106,6 +134,8 @@ Follow the [Dataset Runner Guide](resources/doc/app_runner_dataset.md) to arrang
 DualMap supports input from both **ROS1** and **ROS2**. You can run the system with **offline rosbags** or in **online mode** with real robots.
 
 Follow the [ROS Runner Guide](resources/doc/app_runner_ros.md) to get started with running DualMap using ROS1/ROS2 rosbags or live ROS streams.
+
+If you want to run the ROS2 runner through Docker instead of a local Python environment, see the [ROS2 Docker Guide](resources/doc/app_runner_ros_docker.md).
 
 > **Tip**: If you want to use your own rosbags, check out the [Custom Rosbag Guide](resources/doc/app_custom_rosbag.md).
 

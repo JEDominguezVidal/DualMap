@@ -1,0 +1,89 @@
+# syntax=docker/dockerfile:1.7
+
+FROM ros:jazzy-ros-base AS ros2-base
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    HF_HOME=/opt/dualmap/cache/huggingface \
+    TORCH_HOME=/opt/dualmap/cache/torch \
+    MPLCONFIGDIR=/opt/dualmap/cache/matplotlib \
+    YOLO_CONFIG_DIR=/opt/dualmap/cache/ultralytics \
+    XDG_CACHE_HOME=/opt/dualmap/cache/xdg \
+    PYTHONPATH=/opt/dualmap:/opt/dualmap/3rdparty/mobileclip
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    git \
+    libgl1 \
+    libglib2.0-0 \
+    libgomp1 \
+    libsm6 \
+    libxcursor1 \
+    libxext6 \
+    libxi6 \
+    libxinerama1 \
+    libxrender1 \
+    python3-pip \
+    python3-setuptools \
+    python3-wheel \
+    ros-jazzy-cv-bridge \
+    ros-jazzy-message-filters \
+    ros-jazzy-rviz2 \
+    ros-jazzy-tf2-ros \
+    ros-jazzy-tf2-tools \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /opt/dualmap
+
+COPY docker/requirements_ros2.lock.txt /tmp/requirements_ros2.lock.txt
+
+RUN python3 -m pip install --break-system-packages --ignore-installed \
+    -r /tmp/requirements_ros2.lock.txt
+
+COPY . /opt/dualmap
+
+RUN mkdir -p \
+    /opt/dualmap/cache/huggingface \
+    /opt/dualmap/cache/matplotlib \
+    /opt/dualmap/cache/torch \
+    /opt/dualmap/cache/ultralytics \
+    /opt/dualmap/cache/xdg \
+    /opt/dualmap/bundled-cache/huggingface \
+    /opt/dualmap/model
+
+RUN test -f /opt/dualmap/3rdparty/mobileclip/mobileclip/__init__.py || \
+    (echo "Missing 3rdparty/mobileclip. Clone the repo with --recurse-submodules." && exit 1)
+
+RUN chmod +x /opt/dualmap/docker/entrypoint_ros2.sh
+
+RUN python3 /opt/dualmap/docker/prefetch_runtime_assets.py
+
+RUN test -f /opt/dualmap/model/yolov8l-world.pt || \
+    (echo "Missing YOLO-World weights after prefetch." && exit 1)
+RUN test -f /opt/dualmap/model/mobile_sam.pt || \
+    (echo "Missing MobileSAM weights after prefetch." && exit 1)
+RUN test -f /opt/dualmap/model/FastSAM-s.pt || \
+    (echo "Missing FastSAM weights after prefetch." && exit 1)
+
+ENTRYPOINT ["/opt/dualmap/docker/entrypoint_ros2.sh"]
+CMD ["python3", "-m", "applications.runner_ros"]
+
+FROM ros2-base AS ros2-light
+
+FROM ros2-base AS ros2-bundled
+
+ARG CLIP_MODEL_NAME=MobileCLIP2-S2
+ARG CLIP_PRETRAINED=dfndr2b
+
+ENV CLIP_MODEL_NAME=${CLIP_MODEL_NAME} \
+    CLIP_PRETRAINED=${CLIP_PRETRAINED} \
+    HF_HOME=/opt/dualmap/bundled-cache/huggingface
+
+RUN python3 /opt/dualmap/docker/prefetch_openclip.py
+
+ENV HF_HOME=/opt/dualmap/cache/huggingface

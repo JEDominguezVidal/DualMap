@@ -15,6 +15,7 @@ from cv_bridge import CvBridge
 from message_filters import ApproximateTimeSynchronizer, Subscriber
 from nav_msgs.msg import Odometry
 from omegaconf import OmegaConf
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from sensor_msgs.msg import CameraInfo, CompressedImage, Image
 
@@ -405,15 +406,23 @@ class RunnerROS2(Node, RunnerROSBase):
 
 def run_ros2(cfg):
     """Entry point for launching ROS2 runner."""
+    runner = None
     rclpy.init()
-    runner = RunnerROS2(cfg)
-    runner.logger.warning("[Main] ROS2 Runner started. Waiting for data stream...")
     try:
+        runner = RunnerROS2(cfg)
+        runner.logger.warning("[Main] ROS2 Runner started. Waiting for data stream...")
         while rclpy.ok() and not runner.shutdown_requested:
             rclpy.spin_once(runner, timeout_sec=0.1)
     except KeyboardInterrupt:
-        runner.logger.warning("[Main] KeyboardInterrupt received. Shutting down.")
+        if runner is not None:
+            runner.logger.warning("[Main] KeyboardInterrupt received. Shutting down.")
+    except ExternalShutdownException:
+        if runner is not None:
+            runner.logger.warning("[Main] ROS2 context already shutting down.")
     finally:
-        runner.destroy_node()
-        rclpy.shutdown()
-        runner.logger.warning("[Main] Done.")
+        if runner is not None:
+            runner.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+        if runner is not None:
+            runner.logger.warning("[Main] Done.")

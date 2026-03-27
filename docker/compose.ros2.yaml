@@ -1,0 +1,75 @@
+x-dualmap-build: &dualmap-build
+  context: ..
+  dockerfile: docker/Dockerfile.ros2
+  args:
+    CLIP_MODEL_NAME: ${CLIP_MODEL_NAME:-MobileCLIP2-S2}
+    CLIP_PRETRAINED: ${CLIP_PRETRAINED:-dfndr2b}
+
+x-dualmap-runtime: &dualmap-runtime
+  user: "${LOCAL_UID:-0}:${LOCAL_GID:-0}"
+  working_dir: /opt/dualmap
+  network_mode: host
+  ipc: host
+  stdin_open: true
+  tty: true
+  gpus: all
+  environment: &dualmap-env
+    ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-0}
+    RMW_IMPLEMENTATION: ${RMW_IMPLEMENTATION:-}
+    HF_HOME: /opt/dualmap/cache/huggingface
+    TORCH_HOME: /opt/dualmap/cache/torch
+    MPLCONFIGDIR: /opt/dualmap/cache/matplotlib
+    YOLO_CONFIG_DIR: /opt/dualmap/cache/ultralytics
+    XDG_CACHE_HOME: /opt/dualmap/cache/xdg
+    PYTHONUNBUFFERED: "1"
+  volumes: &dualmap-volumes
+    - ../config:/opt/dualmap/config:ro
+    - ../output:/opt/dualmap/output
+    - ../outputs:/opt/dualmap/outputs
+    - ../.docker-cache/huggingface:/opt/dualmap/cache/huggingface
+    - ../.docker-cache/torch:/opt/dualmap/cache/torch
+    - ../.docker-cache/matplotlib:/opt/dualmap/cache/matplotlib
+    - ../.docker-cache/ultralytics:/opt/dualmap/cache/ultralytics
+    - ../.docker-cache/xdg:/opt/dualmap/cache/xdg
+
+services:
+  dualmap-ros2-headless:
+    <<: *dualmap-runtime
+    build:
+      <<: *dualmap-build
+      target: ${DUALMAP_HEADLESS_TARGET:-ros2-light}
+    image: dualmap:${DUALMAP_HEADLESS_TARGET:-ros2-light}
+    profiles: ["headless"]
+    command:
+      - python3
+      - -m
+      - applications.runner_ros
+      - use_rerun=false
+      - use_rviz=false
+
+  dualmap-ros2-gui:
+    <<: *dualmap-runtime
+    build:
+      <<: *dualmap-build
+      target: ${DUALMAP_GUI_TARGET:-ros2-bundled}
+    image: dualmap:${DUALMAP_GUI_TARGET:-ros2-bundled}
+    profiles: ["gui"]
+    environment:
+      <<: *dualmap-env
+      DISPLAY: ${DISPLAY:-}
+      NVIDIA_DRIVER_CAPABILITIES: ${NVIDIA_DRIVER_CAPABILITIES:-all}
+      QT_X11_NO_MITSHM: "1"
+    volumes:
+      - ../config:/opt/dualmap/config:ro
+      - ../output:/opt/dualmap/output
+      - ../outputs:/opt/dualmap/outputs
+      - ../.docker-cache/huggingface:/opt/dualmap/cache/huggingface
+      - ../.docker-cache/torch:/opt/dualmap/cache/torch
+      - ../.docker-cache/matplotlib:/opt/dualmap/cache/matplotlib
+      - ../.docker-cache/ultralytics:/opt/dualmap/cache/ultralytics
+      - ../.docker-cache/xdg:/opt/dualmap/cache/xdg
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+    command:
+      - python3
+      - -m
+      - applications.runner_ros

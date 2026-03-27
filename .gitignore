@@ -4,6 +4,22 @@ results/
 path/
 log/
 temp/
+.docker-cache/*
+!.docker-cache/huggingface/
+!.docker-cache/matplotlib/
+!.docker-cache/torch/
+!.docker-cache/ultralytics/
+!.docker-cache/xdg/
+.docker-cache/huggingface/*
+.docker-cache/matplotlib/*
+.docker-cache/torch/*
+.docker-cache/ultralytics/*
+.docker-cache/xdg/*
+!.docker-cache/huggingface/.gitkeep
+!.docker-cache/matplotlib/.gitkeep
+!.docker-cache/torch/.gitkeep
+!.docker-cache/ultralytics/.gitkeep
+!.docker-cache/xdg/.gitkeep
 
 
 data/

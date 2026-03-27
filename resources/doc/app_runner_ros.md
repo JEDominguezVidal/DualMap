@@ -4,6 +4,8 @@
     <img src="../image/app_ros.jpg" width="70%">
 </p>
 
+> If you want to run the **ROS2** runner through Docker instead of a local Python environment, use the dedicated [ROS2 Docker Guide](./app_runner_ros_docker.md).
+
 ## 📚 Table of Contents
 - [ROS1 (Noetic) Guide](#ros1-noetic-guide)
     - [Environment Setup](#environment-setup)
@@ -232,4 +234,3 @@ Meanwhile, the **global (abstract) map** will be saved in your configured `outpu
 ## ROS1 <--> ROS2 Bridge
 
 If you need to run a **ROS1 rosbag** within a **ROS2 environment**, or a **ROS2 rosbag** within a **ROS1 environment**,   follow [this guide](./ros_communication.md) to set up a ROS bridge between ROS1 and ROS2.
-
