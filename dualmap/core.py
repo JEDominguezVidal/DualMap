@@ -52,8 +52,18 @@ class Dualmap:
 
         # Additional initialization for visualization
         self.visualizer.set_use_rerun(cfg.use_rerun)
-        self.visualizer.init("refactor_mapping")
-        self.visualizer.spawn()
+        if self.cfg.use_rerun:
+            self.visualizer.init("refactor_mapping")
+            if getattr(self.cfg, "spawn_rerun_viewer", True):
+                self.visualizer.spawn(port=9876)
+            else:
+                self.visualizer.serve_grpc(grpc_port=9876)
+                logger.warning(
+                    "[Core][Init] Rerun viewer auto-spawn disabled. Connect from the host with: "
+                    "rerun --connect rerun+http://127.0.0.1:9876/proxy"
+                )
+        else:
+            logger.warning("[Core][Init] Rerun visualization disabled.")
 
         # Keyframe Selection
         self.keyframe_counter = 0
@@ -67,6 +77,7 @@ class Dualmap:
         # pose memory
         self.curr_pose = None
         self.prev_pose = None
+        self.curr_frame_id = -1
         self.wait_count = 0
 
         # check if need to preload the global map
@@ -611,7 +622,7 @@ class Dualmap:
         """
         The process of ending the sequnce.
         """
-        end_frame_id = self.curr_frame_id
+        end_frame_id = getattr(self, "curr_frame_id", -1)
 
         self.stop_threading()
         logger.info(
@@ -620,41 +631,46 @@ class Dualmap:
             len(self.global_map_manager.global_map),
         )
 
-        # end duration
-        end_range = self.cfg.active_window_size + self.cfg.max_pending_count + 1
+        if end_frame_id < 0:
+            logger.warning(
+                "[Core][EndProcess] No frames were processed before shutdown. Skipping drain loop."
+            )
+        else:
+            # end duration
+            end_range = self.cfg.active_window_size + self.cfg.max_pending_count + 1
 
-        # Merge duplicate local objects BEFORE the elimination loop drains them
-        with timing_context("Merging", self):
-            if self.cfg.merge_local_map:
-                self.local_map_manager.merge_local_map()
-                self.visualizer.set_time_sequence("frame", end_frame_id + 1)
-                logger.info("[Core][EndProcess] Local Map Merged")
+            # Merge duplicate local objects BEFORE the elimination loop drains them
+            with timing_context("Merging", self):
+                if self.cfg.merge_local_map:
+                    self.local_map_manager.merge_local_map()
+                    self.visualizer.set_time_sequence("frame", end_frame_id + 1)
+                    logger.info("[Core][EndProcess] Local Map Merged")
 
-        for i in range(end_range):
-            # Set timestamp for visualizer
-            logger.info("[Core][EndProcess] End Counter: %d", end_frame_id + i + 1)
-            self.visualizer.set_time_sequence("frame", end_frame_id + i + 1)
+            for i in range(end_range):
+                # Set timestamp for visualizer
+                logger.info("[Core][EndProcess] End Counter: %d", end_frame_id + i + 1)
+                self.visualizer.set_time_sequence("frame", end_frame_id + i + 1)
 
-            # local end_process
-            # set fake timestamp
-            self.local_map_manager.set_curr_idx(end_frame_id + i + 1)
-            self.local_map_manager.end_process()
-            local_map_obj_num = len(self.local_map_manager.local_map)
-            logger.info("[Core][EndProcess] Local Objects num: %d", local_map_obj_num)
+                # local end_process
+                # set fake timestamp
+                self.local_map_manager.set_curr_idx(end_frame_id + i + 1)
+                self.local_map_manager.end_process()
+                local_map_obj_num = len(self.local_map_manager.local_map)
+                logger.info("[Core][EndProcess] Local Objects num: %d", local_map_obj_num)
 
-            # global process
-            global_obs_list = self.local_map_manager.get_global_observations()
-            self.local_map_manager.clear_global_observations()
-            if global_obs_list:
-                self.global_map_manager.process_observations(global_obs_list)
-            global_map_obj_num = len(self.global_map_manager.global_map)
-            logger.info("[Core][EndProcess] Global Objects num: %d", global_map_obj_num)
+                # global process
+                global_obs_list = self.local_map_manager.get_global_observations()
+                self.local_map_manager.clear_global_observations()
+                if global_obs_list:
+                    self.global_map_manager.process_observations(global_obs_list)
+                global_map_obj_num = len(self.global_map_manager.global_map)
+                logger.info("[Core][EndProcess] Global Objects num: %d", global_map_obj_num)
 
-            if local_map_obj_num == 0:
-                logger.warning(
-                    "[EndProcess] End Processing End. to: %d", end_frame_id + i + 1
-                )
-                break
+                if local_map_obj_num == 0:
+                    logger.warning(
+                        "[EndProcess] End Processing End. to: %d", end_frame_id + i + 1
+                    )
+                    break
 
         # save the local mapping results
         if self.cfg.save_local_map:

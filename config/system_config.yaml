@@ -101,6 +101,10 @@ device: cuda
 # Controls whether real-time visualisation is displayed via Rerun.
 # Disable for headless servers or batch processing to save resources.
 use_rerun: True
+# Controls whether DualMap tries to open the native Rerun viewer process.
+# Disable this in Docker if you want to connect manually from the host with:
+#   rerun --connect rerun+http://127.0.0.1:9876/proxy
+spawn_rerun_viewer: True
 
 
 # -------------------------------------------------------
