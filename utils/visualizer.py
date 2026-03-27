@@ -56,16 +56,19 @@ class ReRunVisualizer:
 
     def set_use_rerun(self, use_rerun):
         self._use_rerun = use_rerun
-        if self._use_rerun and self._rerun is None:
-            try:
-                import rerun as rr
+        if self._use_rerun:
+            if self._rerun is None:
+                try:
+                    import rerun as rr
 
-                self._rerun = rr
-                logger.info("[Visualizar] rerun is installed. Using rerun for logger.")
-            except ImportError:
-                logger.warning(
-                    "[Visualizar] rerun is not installed. Not using rerun for logger."
-                )
+                    self._rerun = rr
+                    logger.info("[Visualizar] rerun is installed. Using rerun for logger.")
+                except ImportError:
+                    logger.warning(
+                        "[Visualizar] rerun is not installed. Not using rerun for logger."
+                    )
+            else:
+                logger.info("[Visualizar] rerun is ready. Using rerun for logger.")
         else:
             logger.warning(
                 "[Visualizar] rerun functionality is disabled in the config. Not using rerun for logger."

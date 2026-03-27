@@ -34,6 +34,13 @@ from utils.visualizer import ReRunVisualizer, visualize_result_rgb
 logger = logging.getLogger(__name__)
 
 
+class DetectorInitializationError(RuntimeError):
+    def __init__(self, stage: str, original_error: Exception) -> None:
+        self.stage = stage
+        self.original_error = original_error
+        super().__init__(f"[Detector][Init] Failed while loading {stage}: {original_error}")
+
+
 class PoseLowPassFilter:
     def __init__(self, alpha=0.95):
         self.alpha = alpha
@@ -109,6 +116,17 @@ class Detector:
         # get detection paths
         self.detection_path = Path(cfg.detection_path)
         self.detection_path.mkdir(parents=True, exist_ok=True)
+        self.detector_ready = not cfg.run_detection
+        self.clip_model = None
+        self.clip_tokenizer = None
+        self.clip_preprocess = None
+        self.yolo = None
+        self.sam = None
+        self.fastsam = None
+        self.filter = None
+        self.proto_feats = None
+        self.class_feats = None
+        self.class_feats_mean = None
 
         # Detection results
         # NOTICE: Detection results are stored in Batch, it is not separated by objects
@@ -165,6 +183,14 @@ class Detector:
         logger.info(f"[Detector][Init] Initilizating detection modules...")
 
         if cfg.run_detection:
+            clip_model = None
+            clip_tokenizer = None
+            clip_preprocess = None
+            yolo = None
+            sam = None
+            fastsam = None
+            filter_module = None
+
             try:
                 # CLIP module
                 logger.info(
@@ -181,47 +207,44 @@ class Detector:
                 ):
                     model_kwargs = {"image_mean": (0, 0, 0), "image_std": (1, 1, 1)}
 
-                self.clip_model, _, self.clip_preprocess = (
+                clip_model, _, clip_preprocess = (
                     open_clip.create_model_and_transforms(
                         cfg.clip.model_name,
                         pretrained=cfg.clip.pretrained,
                         **model_kwargs,
                     )
                 )
-                self.clip_model = self.clip_model.to(cfg.device)
-                self.clip_model.eval()
+                clip_model = clip_model.to(cfg.device)
+                clip_model.eval()
 
                 # Only reparameterize if the model is MobileCLIP
                 if "MobileCLIP" in cfg.clip.model_name:
                     from mobileclip.modules.common.mobileone import reparameterize_model
 
-                    self.clip_model = reparameterize_model(self.clip_model)
+                    clip_model = reparameterize_model(clip_model)
 
-                self.clip_tokenizer = open_clip.get_tokenizer(cfg.clip.model_name)
+                clip_tokenizer = open_clip.get_tokenizer(cfg.clip.model_name)
             except Exception as e:
-                logger.error(f"[Detector][Init] Error loading CLIP model: {e}")
-                return
+                raise DetectorInitializationError("CLIP model", e) from e
 
             try:
                 # Detection module
                 logger.info(
                     f"[Detector][Init] Loading YOLO model from\t{cfg.yolo.model_path}"
                 )
-                self.yolo = YOLO(cfg.yolo.model_path)
-                self.yolo.set_classes(self.obj_classes.get_classes_arr())
+                yolo = YOLO(cfg.yolo.model_path)
+                yolo.set_classes(self.obj_classes.get_classes_arr())
             except Exception as e:
-                logger.error(f"[Detector][Init] Error loading YOLO model: {e}")
-                return
+                raise DetectorInitializationError("YOLO model", e) from e
 
             try:
                 # Segmentation module
                 logger.info(
                     f"[Detector][Init] Loading SAM model from\t{cfg.sam.model_path}"
                 )
-                self.sam = SAM(cfg.sam.model_path)
+                sam = SAM(cfg.sam.model_path)
             except Exception as e:
-                logger.error(f"[Detector][Init] Error loading SAM model: {e}")
-                return
+                raise DetectorInitializationError("SAM model", e) from e
 
             # Open fastsam for open vocabulary detection
             if cfg.use_fastsam:
@@ -229,63 +252,101 @@ class Detector:
                     logger.info(
                         f"[Detector][Init] Loading FastSAM model from\t{cfg.fastsam.model_path}"
                     )
-                    self.fastsam = FastSAM(cfg.fastsam.model_path)
+                    fastsam = FastSAM(cfg.fastsam.model_path)
                 except Exception as e:
-                    logger.error(f"[Detector][Init] Error loading FASTSAM model: {e}")
-                    return
+                    raise DetectorInitializationError("FastSAM model", e) from e
 
             logger.info("[Detector][Init] Initializing high-low mobility classifier.")
-            lm_examples = cfg.lm_examples
-            hm_examples = cfg.hm_examples
-            lm_descriptions = cfg.lm_descriptions
-            num_examples = [len(lm_examples), len(hm_examples), len(lm_descriptions)]
-            prototypes = lm_examples + hm_examples + lm_descriptions
-            proto_feats = get_text_features(
-                prototypes,
-                self.clip_model,
-                self.clip_tokenizer,
-                device=cfg.device,
-                clip_length=cfg.clip.clip_length,
-            )
-            self.num_examples = num_examples
-            self.proto_feats = proto_feats
-
-            # Get the text feats of all the classes
-            class_feats = get_text_features(
-                self.obj_classes.get_classes_arr(),
-                self.clip_model,
-                self.clip_tokenizer,
-                device=cfg.device,
-                clip_length=cfg.clip.clip_length,
-            )
-            self.class_feats = class_feats
-            self.relabel_candidate_ids = self.build_relabel_candidate_ids()
-
-            if cfg.clip_unknown_relabel.enabled and len(self.relabel_candidate_ids) == 0:
-                raise ValueError(
-                    "CLIP unknown relabeling is enabled, but no candidate classes "
-                    "remain after applying the configured exclusions."
+            try:
+                lm_examples = cfg.lm_examples
+                hm_examples = cfg.hm_examples
+                lm_descriptions = cfg.lm_descriptions
+                num_examples = [len(lm_examples), len(hm_examples), len(lm_descriptions)]
+                prototypes = lm_examples + hm_examples + lm_descriptions
+                proto_feats = get_text_features(
+                    prototypes,
+                    clip_model,
+                    clip_tokenizer,
+                    device=cfg.device,
+                    clip_length=cfg.clip.clip_length,
                 )
+                self.num_examples = num_examples
 
-            # Used for unknown class
-            if cfg.use_avg_feat_for_unknown:
+                # Get the text feats of all the classes
+                class_feats = get_text_features(
+                    self.obj_classes.get_classes_arr(),
+                    clip_model,
+                    clip_tokenizer,
+                    device=cfg.device,
+                    clip_length=cfg.clip.clip_length,
+                )
                 class_feats_mean = np.mean(class_feats, axis=0)
-                self.class_feats_mean = class_feats_mean / np.linalg.norm(
-                    class_feats_mean
-                )
+                class_feats_mean = class_feats_mean / np.linalg.norm(class_feats_mean)
+                self.class_feats_mean = class_feats_mean
+                self.class_feats = class_feats
+                self.proto_feats = proto_feats
+                self.relabel_candidate_ids = self.build_relabel_candidate_ids()
 
-            with timing_context("Detection Filter", self):
-                self.filter = Filter(
-                    classes=self.obj_classes,
-                    small_mask_size=self.cfg.small_mask_th,
-                    skip_refinement=self.cfg.skip_refinement,
-                )
-                self.filter.set_device(self.cfg.device)
+                if (
+                    cfg.clip_unknown_relabel.enabled
+                    and len(self.relabel_candidate_ids) == 0
+                ):
+                    raise ValueError(
+                        "CLIP unknown relabeling is enabled, but no candidate classes "
+                        "remain after applying the configured exclusions."
+                    )
+
+                with timing_context("Detection Filter", self):
+                    filter_module = Filter(
+                        classes=self.obj_classes,
+                        small_mask_size=self.cfg.small_mask_th,
+                        skip_refinement=self.cfg.skip_refinement,
+                    )
+                    filter_module.set_device(self.cfg.device)
+            except Exception as e:
+                raise DetectorInitializationError("detection feature setup", e) from e
+
+            self.clip_model = clip_model
+            self.clip_tokenizer = clip_tokenizer
+            self.clip_preprocess = clip_preprocess
+            self.yolo = yolo
+            self.sam = sam
+            self.fastsam = fastsam
+            self.filter = filter_module
+            self.detector_ready = True
+        else:
+            self.detector_ready = True
 
         # for filtering the pose of follower camera for visualization
         self.pose_filter_follower = PoseLowPassFilter(alpha=0.95)
 
         logger.info(f"[Detector][Init] Finish Init.")
+
+    def _ensure_detection_modules_ready(self) -> None:
+        if not self.cfg.run_detection:
+            raise RuntimeError(
+                "[Detector] Detection requested while run_detection is disabled."
+            )
+
+        missing = []
+        if not self.detector_ready:
+            missing.append("detector initialization")
+        if self.clip_model is None or self.clip_tokenizer is None or self.clip_preprocess is None:
+            missing.append("clip")
+        if self.yolo is None:
+            missing.append("yolo")
+        if self.sam is None:
+            missing.append("sam")
+        if self.filter is None:
+            missing.append("filter")
+        if self.cfg.use_fastsam and self.fastsam is None:
+            missing.append("fastsam")
+
+        if missing:
+            raise RuntimeError(
+                "[Detector] Detection modules are not ready. Missing: "
+                + ", ".join(missing)
+            )
 
     def update_state(self) -> None:
         self.curr_results = {}
@@ -559,6 +620,10 @@ class Detector:
         return merged_detections
 
     def process_fastsam(self, color):
+        if self.fastsam is None:
+            raise RuntimeError(
+                "[Detector] FastSAM processing requested before FastSAM was initialized."
+            )
 
         with timing_context("FastSAM", self):
             fs_confidence_np, fs_class_id_np, fs_xyxy_np, fs_masks_np = (
@@ -588,6 +653,17 @@ class Detector:
         self.fastsam_detections = fs_detections
 
     def process_yolo_and_sam(self, color):
+        if self.yolo is None or self.sam is None:
+            missing = []
+            if self.yolo is None:
+                missing.append("yolo")
+            if self.sam is None:
+                missing.append("sam")
+            raise RuntimeError(
+                "[Detector] YOLO/SAM processing requested before initialization. Missing: "
+                + ", ".join(missing)
+            )
+
         with timing_context("YOLO", self):
             confidence, class_id, class_labels, xyxy = self.process_yolo_results(
                 color, self.obj_classes
@@ -1294,6 +1370,7 @@ class Detector:
         return annotated_image
 
     def process_detections(self):
+        self._ensure_detection_modules_ready()
 
         color = self.curr_data.color.astype(np.uint8)
         self.last_detection_stats = {
