@@ -12,10 +12,11 @@ import hydra
 import matplotlib
 import numpy as np
 import open3d as o3d
-import open_clip
 import torch
 import torch.nn.functional as F
 from omegaconf import DictConfig, OmegaConf
+
+from dualmap.clip_runtime import create_open_clip_components
 
 # Intercept and remove custom argument to avoid Hydra conflicts
 global_top_k = 5
@@ -117,33 +118,11 @@ def main(cfg: DictConfig):
 
     ### Init of CLIP
     print("Loading CLIP model")
-    # clip_model, _, clip_preprocess = open_clip.create_model_and_transforms(
-    #     "ViT-H-14", "laion2b_s32b_b79k"
-    # )
-    # clip_model = clip_model.to("cuda")
-    # clip_tokenizer = open_clip.get_tokenizer("ViT-H-14")
-
-    # MobileCLIP2 S0/S2/B models need custom image normalization
-    model_kwargs = {}
-    model_name = cfg.clip.model_name
-    if model_name.startswith("MobileCLIP2") and not (
-        model_name.endswith("S3") or model_name.endswith("S4") or model_name.endswith("L-14")
-    ):
-        model_kwargs = {"image_mean": (0, 0, 0), "image_std": (1, 1, 1)}
-
-    clip_model, _, clip_preprocess = open_clip.create_model_and_transforms(
-        cfg.clip.model_name, pretrained=cfg.clip.pretrained, **model_kwargs
+    clip_model, clip_preprocess, clip_tokenizer = create_open_clip_components(
+        cfg.clip.model_name,
+        cfg.clip.pretrained,
+        cfg.device,
     )
-    clip_model = clip_model.to(cfg.device)
-    clip_model.eval()
-
-    # Only reparameterize if the model is MobileCLIP
-    if "MobileCLIP" in cfg.clip.model_name:
-        from mobileclip.modules.common.mobileone import reparameterize_model
-
-        clip_model = reparameterize_model(clip_model)
-
-    clip_tokenizer = open_clip.get_tokenizer(cfg.clip.model_name)
 
     print("Done initializing CLIP model.")
 

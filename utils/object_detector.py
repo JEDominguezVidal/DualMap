@@ -11,7 +11,6 @@ from pathlib import Path
 import cv2
 import numpy as np
 import open3d as o3d
-import open_clip
 import supervision as sv
 import torch
 from omegaconf import DictConfig
@@ -21,6 +20,8 @@ from scipy.spatial.transform import Slerp
 from sklearn.metrics.pairwise import cosine_similarity
 from ultralytics import SAM, YOLO, FastSAM
 
+from dualmap.clip_runtime import create_open_clip_components
+from dualmap.runtime_assets import ensure_runtime_assets
 from utils.pcd_utils import (
     mask_depth_to_points,
     refine_points_with_clustering,
@@ -196,39 +197,19 @@ class Detector:
                 logger.info(
                     f"[Detector][Init] Loading CLIP model: {cfg.clip.model_name} with pretrained weights '{cfg.clip.pretrained}'"
                 )
-
-                # MobileCLIP2 S0/S2/B models need custom image normalization
-                model_kwargs = {}
-                model_name = cfg.clip.model_name
-                if model_name.startswith("MobileCLIP2") and not (
-                    model_name.endswith("S3")
-                    or model_name.endswith("S4")
-                    or model_name.endswith("L-14")
-                ):
-                    model_kwargs = {"image_mean": (0, 0, 0), "image_std": (1, 1, 1)}
-
-                clip_model, _, clip_preprocess = (
-                    open_clip.create_model_and_transforms(
+                clip_model, clip_preprocess, clip_tokenizer = (
+                    create_open_clip_components(
                         cfg.clip.model_name,
-                        pretrained=cfg.clip.pretrained,
-                        **model_kwargs,
+                        cfg.clip.pretrained,
+                        cfg.device,
                     )
                 )
-                clip_model = clip_model.to(cfg.device)
-                clip_model.eval()
-
-                # Only reparameterize if the model is MobileCLIP
-                if "MobileCLIP" in cfg.clip.model_name:
-                    from mobileclip.modules.common.mobileone import reparameterize_model
-
-                    clip_model = reparameterize_model(clip_model)
-
-                clip_tokenizer = open_clip.get_tokenizer(cfg.clip.model_name)
             except Exception as e:
                 raise DetectorInitializationError("CLIP model", e) from e
 
             try:
                 # Detection module
+                ensure_runtime_assets([cfg.yolo.model_path])
                 logger.info(
                     f"[Detector][Init] Loading YOLO model from\t{cfg.yolo.model_path}"
                 )
@@ -239,6 +220,7 @@ class Detector:
 
             try:
                 # Segmentation module
+                ensure_runtime_assets([cfg.sam.model_path])
                 logger.info(
                     f"[Detector][Init] Loading SAM model from\t{cfg.sam.model_path}"
                 )
@@ -249,6 +231,7 @@ class Detector:
             # Open fastsam for open vocabulary detection
             if cfg.use_fastsam:
                 try:
+                    ensure_runtime_assets([cfg.fastsam.model_path])
                     logger.info(
                         f"[Detector][Init] Loading FastSAM model from\t{cfg.fastsam.model_path}"
                     )

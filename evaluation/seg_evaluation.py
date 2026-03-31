@@ -7,13 +7,13 @@ from pprint import pprint
 import hydra
 import numpy as np
 import open3d as o3d
-import open_clip
 import torch
 import yaml
 from omegaconf import DictConfig, OmegaConf
 from scipy.optimize import linear_sum_assignment
 from sklearn.metrics.pairwise import cosine_similarity
 
+from dualmap.clip_runtime import create_open_clip_components
 from utils.eval.eval_utils import *
 from utils.eval.metric import *
 from utils.object import BaseObject
@@ -216,29 +216,11 @@ def main(cfg: DictConfig):
         print(
             f"[Detector] Loading CLIP model: {cfg.clip.model_name} with pretrained weights '{cfg.clip.pretrained}'"
         )
-
-        model_kwargs = {}
-        model_name = cfg.clip.model_name
-        if model_name.startswith("MobileCLIP2") and not (
-            model_name.endswith("S3")
-            or model_name.endswith("S4")
-            or model_name.endswith("L-14")
-        ):
-            model_kwargs = {"image_mean": (0, 0, 0), "image_std": (1, 1, 1)}
-
-        clip_model, _, clip_preprocess = open_clip.create_model_and_transforms(
-            cfg.clip.model_name, pretrained=cfg.clip.pretrained, **model_kwargs
+        clip_model, clip_preprocess, clip_tokenizer = create_open_clip_components(
+            cfg.clip.model_name,
+            cfg.clip.pretrained,
+            cfg.device,
         )
-        clip_model = clip_model.to(cfg.device)
-        clip_model.eval()
-
-        # Only reparameterize if the model is MobileCLIP
-        if "MobileCLIP" in cfg.clip.model_name:
-            from mobileclip.modules.common.mobileone import reparameterize_model
-
-            clip_model = reparameterize_model(clip_model)
-
-        clip_tokenizer = open_clip.get_tokenizer(cfg.clip.model_name)
 
         print("Start CLIP Label Generation and Evaluation")
 
