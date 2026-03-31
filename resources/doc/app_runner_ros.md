@@ -11,7 +11,7 @@
     - [Environment Setup](#environment-setup)
     - [Download Rosbag Data](#download-rosbag-data)
     - [Run with ROS1](#run-with-ros1)
-- [ROS2 (Humble) Guide](#ros2-humble-guide)
+- [ROS2 (Jazzy) Guide](#ros2-jazzy-guide)
     - [Environment Setup](#environment-setup-1)
     - [Download Rosbag Data](#download-rosbag-data-1)
     - [Run with ROS2](#run-with-ros2)
@@ -104,7 +104,7 @@ roscore
 In a new terminal:
 ```bash
 cd DualMap
-conda activate dualmap
+source .venv/bin/activate
 ```
 **3. Source ROS1 and Run DualMap**
 
@@ -200,12 +200,11 @@ use_compressed_topic: false
 
 ```bash
 cd DualMap
-source dualmap312/bin/activate
+source .venv/bin/activate
 ```
 **2. Source ROS2 and Run DualMap**
 
 
-```bash
 ```bash
 source /opt/ros/jazzy/setup.bash
 python -m applications.runner_ros

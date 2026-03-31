@@ -67,9 +67,9 @@ dataset/
 ```
 
 ## Run
-First activate the conda environment
+First activate the local virtual environment
 ```
-source dualmap312/bin/activate
+source .venv/bin/activate
 ```
 
 Then, navigate to the repository root and run the application:
@@ -238,4 +238,3 @@ Make sure to run the following command **before** executing `python -m evaluatio
 ```
 python -m applications.generate_replica_class_color
 ```
-

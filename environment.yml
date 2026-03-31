@@ -21,6 +21,7 @@ dependencies:
       - h5py
       - openai
       - hydra-core
+      - omegaconf
       - distinctipy
       - ultralytics==8.3.103
       - dill
@@ -37,4 +38,12 @@ dependencies:
       - pympler
       - plyfile
       - "numpy<2.0"
+      - opencv-python
+      - matplotlib
+      - networkx
+      - PyYAML
+      - tqdm
+      - pandas
+      - Pillow
+      - xlsxwriter
       - git+https://github.com/ultralytics/CLIP.git

@@ -104,7 +104,7 @@ You can create your own class list text file if needed.
 1.  **Start DualMap**:
     ```bash
     cd DualMap
-    source dualmap312/bin/activate
+    source .venv/bin/activate
     source /opt/ros/jazzy/setup.bash
     python -m applications.runner_ros
     ```

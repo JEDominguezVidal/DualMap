@@ -26,38 +26,51 @@ The system supports multiple input sources, including offline datasets (**Datase
 ### 1. Clone the Repository (with submodules)
 
 ```bash
-git clone --branch main --single-branch --recurse-submodules git@github.com:Eku127/DualMap.git
+git clone --branch main --single-branch --recurse-submodules https://github.com/JEDominguezVidal/DualMap.git
 cd DualMap
 ```
->  Make sure to use `--recurse-submodules` to get `mobileclip`.
+> `mobileclip` is no longer installed separately with `pip`, but we still recommend cloning with `--recurse-submodules`.
 
-### 2. Create Python Virtual Environment
+### 2. Run the Local Setup Script
+
 ```bash
-# Install venv if not present
-sudo apt install python3-venv
-
-# Create virtual environment
-python3.12 -m venv dualmap312
-
-# Activate environment
-source dualmap312/bin/activate
-
-# Install dependencies
-pip install -r requirements_py312.txt
+./scripts/setup_local_ubuntu24.sh --system-deps
 ```
 
-> **Note on NumPy**: This project requires `numpy<2.0` (specifically 1.26.x) due to ABI incompatibility with ROS 2 Jazzy's pre-built binaries. The `requirements_py312.txt` file handles this automatically. Do not upgrade numpy to 2.x manually.
+This script:
 
-### 3. Install MobileCLIP
+- installs the validated non-ROS Ubuntu packages
+- creates `.venv`
+- installs all Python dependencies from `requirements.txt`
+- runs `python -m scripts.check_install`
+
+If you prefer to install the Ubuntu packages yourself, you can omit `--system-deps`.
+
+> **Note on NumPy**: This project requires `numpy<2.0` (specifically 1.26.x) due to ABI incompatibility with ROS 2 Jazzy's pre-built binaries. The `requirements.txt` file handles this automatically. Do not upgrade numpy to 2.x manually.
+
+### 3. Activate the Environment
+
 ```bash
-cd 3rdparty/mobileclip
-pip install -e . --no-deps
-cd ../..
+source .venv/bin/activate
 ```
-> The system defaults to `MobileCLIP2-S2`.
-> Since August 2025, `MobileCLIP-v2` has been released, and the system now uses `v2` (specifically `MobileCLIP2-S2`) by default, which offers better performance.
 
-### 4. (Optional) Setup ROS 2 Environment
+The separate `pip install -e 3rdparty/mobileclip --no-deps` step is no longer required.
+
+### 4. Runtime Models Download Automatically
+
+The default runtime assets are downloaded automatically on first use if missing:
+
+- `model/yolov8l-world.pt`
+- `model/mobile_sam.pt`
+- `model/FastSAM-s.pt`
+
+If you want an offline-ready setup up front, run:
+
+```bash
+python -m scripts.prefetch_runtime_assets
+```
+
+### 5. (Optional) Setup ROS 2 Environment
 Setting up ROS2 environment for ROS support and applications.
 We recommend [ROS 2 Jazzy](https://docs.ros.org/en/jazzy/Installation.html).
 Once installed, activate the environment:
@@ -70,13 +83,13 @@ source /opt/ros/jazzy/setup.bash
 
 > **ROS1 noetic** is also supported, you can setup the ROS 1 in Ubuntu 22.04 by follow [this guide](resources/doc/ros_communication.md).
 
-### 5. (Optional) Setup Habitat Data Collector
+### 6. (Optional) Setup Habitat Data Collector
 
 [Habitat Data Collector](https://github.com/Eku127/habitat-data-collector) is a tool built on top of the [Habitat-sim](https://github.com/facebookresearch/habitat-sim). It supports agent control, object manipulation, dataset and ROS2 bag recording, as well as navigation through external ROS2 topics. DualMap subscribes to live ROS2 topics from the collector for real-time mapping and language-guided querying, and publishes navigation trajectories for the agent to follow.
 
 > For the best DualMap experience (especially interactive mapping and navigation), **we strongly recommend setting up the Habitat Data Collector**. See [the repo](https://github.com/Eku127/habitat-data-collector) for installation and usage details.
 
-### 6. (Optional) Run with Docker for ROS2
+### 7. (Optional) Run with Docker for ROS2
 
 The local Python environment above remains the primary installation path and is fully supported.
 In addition, this repository now ships a ROS2-focused Docker workflow that can run the online ROS runner without creating a local virtual environment.
@@ -109,7 +122,7 @@ The full Docker guide also covers the one-time cleanup of older DualMap Docker i
 
 Here's a quick overview of the requirements for each application type:
 
-| Application | Conda Env | ROS1 | ROS2 | Habitat Data Collector |
+| Application | Python Env | ROS1 | ROS2 | Habitat Data Collector |
 | :--- | :---: | :---: | :---: | :---: |
 | Datasets / Query / iPhone | ✓ | | | |
 | ROS (Offline/Online) | ✓ | ✓ | ✓ | |

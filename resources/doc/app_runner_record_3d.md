@@ -28,7 +28,7 @@ Make sure your iPhone is properly connected, then run the following commands:
 
 ```bash
 cd DualMap
-conda activate dualmap
+source .venv/bin/activate
 
 python -m applications.runner_record_3d
 ```

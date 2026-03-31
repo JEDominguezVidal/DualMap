@@ -41,7 +41,7 @@ Then, open a terminal and start DualMap:
 
 ```bash
 cd DualMap
-source dualmap312/bin/activate
+source .venv/bin/activate
 
 source /opt/ros/jazzy/setup.bash
 python -m applications.runner_ros
@@ -104,7 +104,7 @@ Then, open a terminal and start DualMap:
 
 ```bash
 cd DualMap
-source dualmap312/bin/activate
+source .venv/bin/activate
 
 source /opt/ros/jazzy/setup.bash
 python -m applications.runner_ros
@@ -140,7 +140,7 @@ Follow the same process as before:
 **Terminal A** — Start DualMap
 ```bash
 cd DualMap
-source dualmap312/bin/activate
+source .venv/bin/activate
 
 source /opt/ros/jazzy/setup.bash
 python -m applications.runner_ros
